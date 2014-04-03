@@ -7,6 +7,7 @@ in the spaces.rkt format.
 
 (require racket/match racket/set racket/dict racket/promise
          racket/list
+         racket/trace
          "spaces.rkt"
          "shared.rkt")
 (provide c/apply-reduction-relation
@@ -17,7 +18,7 @@ in the spaces.rkt format.
 ;; There is at most one match.
 ;; If there is a match, the result is the binding environment. Otherwise #f.
 (define ((c/match L) pattern data ρ)
-  (let c/match ([pattern pattern] [data data] [ρ ρ])
+  (define (inner pattern data ρ)
     (match* (pattern data)
       [((Bvar x Space-name) d)
        (match (dict-ref ρ x -unmapped)
@@ -28,16 +29,18 @@ in the spaces.rkt format.
                     ρ
                     #f)])]
       [((Variant name comps) (Variant name data))
-       (let recur ([comps comps] [data data] [ρ ρ])
+       (define (recur comps data ρ)
          (match* (comps data)
            [('() '()) ρ]
            [((cons comp comps) (cons d data))
-            (define ρop (c/match comp d ρ))
+            (define ρop (inner comp d ρ))
             (and ρop (recur comps data ρop))]
-           [(_ _) #f]))]
-      [(Rvar x) (error 'c/match "Unexpected reference in match pattern ~a" x)]
+           [(_ _) #f]))
+       (recur comps data ρ)]
+      [((? Rvar?) x) (error 'c/match "Unexpected reference in match pattern ~a" x)]
       [(atom atom) ρ]
-      [(_ _) #f])))
+      [(_ _) #f]))
+  (inner pattern data ρ))
 
 ;; c/expression-eval : Language Expression Map[Symbol,DPattern] Map[Symbol,Meta-function] → ℘(DPattern)
 ;; Concrete evaluation of expressions. Returns entire set of possible evaluations
@@ -48,7 +51,7 @@ in the spaces.rkt format.
     (define (eval* e) (c/expression-eval* e ρ))
     (match e
       [(Map-lookup* m kexpr default? dexpr)
-       (define ks (eval* kexpr ρ))
+       (define ks (eval* kexpr))
        (define map (hash-ref ρ m (unbound-map-error 'map-ref m)))
        (define lazy-default ;; avoid allocating if no default
          (and default? (delay (eval* dexpr))))
