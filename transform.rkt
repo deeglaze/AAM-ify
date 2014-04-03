@@ -17,8 +17,8 @@ The key ideas:
 
 (require graph
          racket/trace
-         "AAM-spaces.rkt"
-         "AAM-shared.rkt")
+         "spaces.rkt"
+         "shared.rkt")
 (provide abstract-language abstract-rule)
 
 ;; Abstract counting algebra
@@ -181,7 +181,7 @@ The key ideas:
          ;; If a map domain contains addresses, the map is now treated as
          ;; m(a) = b implies ∃ A ∈ γ(a). A ↦ b, but we don't know if A is actually in the map.
          ;; Additionally, the Map now becomes weak, so b is lifted implicitly to a powerset domain.
-         ;; TODO: build an escape hatch for smarter lattices.
+         ;; WISHLIST: build an escape hatch for smarter lattices.
          (cond [dom-abs? (values (Map abs-dom (℘ abs-range)) #t)]
                [else (values (Map abs-dom abs-range) rng-abs?)])]
         [(Address-Space) (values comp #t)]))
@@ -447,7 +447,7 @@ The key ideas:
   (define-values (lhs* lhs-binding-side-conditions)
     (flatten-pattern lhs '() #f))
 
-  ;; TODO: Finally we rewrite the binding side-conditionts to go between the
+  ;; TODO: Finally we rewrite the binding side-conditions to go between the
   ;; lhs and rhs bindings/side-conditions
   (define binding-side-conditions*
     binding-side-conditions)
@@ -457,7 +457,7 @@ The key ideas:
                                     store-updates)))
 
 (module+ test
-  (require "AAM-concrete.rkt")
+  (require "concrete.rkt")
   (define CESK-lang
     (Language
      'LC/CESK

@@ -2,13 +2,13 @@
 
 #|
 This module defines the concrete semantics of reduction for languages written
-in the AAM-spaces format.
+in the spaces.rkt format.
 |#
 
 (require racket/match racket/set racket/dict racket/promise
          racket/list
-         "AAM-spaces.rkt"
-         "AAM-shared.rkt")
+         "spaces.rkt"
+         "shared.rkt")
 (provide c/apply-reduction-relation
          c/apply-reduction-relation*)
 

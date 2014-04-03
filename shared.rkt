@@ -4,7 +4,7 @@
 Utility functions and specific functions that are shared between concrete and abstract AAM
 |#
 
-(require racket/match racket/set racket/dict "AAM-spaces.rkt")
+(require racket/match racket/set racket/dict "spaces.rkt")
 (provide unbound-map-error
          pattern-eval
          in-space?
