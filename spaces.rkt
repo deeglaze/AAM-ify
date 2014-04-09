@@ -10,7 +10,7 @@ Allow stores (special)
 
 |#
 
-;; A Language is a (Language name Map[Space-name,Either[Space,Component]])
+;; A Language is a (Language Name Symbol Map[Space-name,Either[Space,Component]])
 ;; Where scope of space names is letrec*
 ;; All occurrences of the same named Variant are expected to have a total ordering.
 ;;   That is, some spaces may use a refined notion of a variant, but never a re-defined notion.
@@ -28,24 +28,52 @@ Allow stores (special)
 
 ;; A Component is one of
 ;; - a (Space-reference Name)
-;; - an (Address-Space)
+;; - an (Address-Space Name)
 ;; - a (Map Component Component)
 ;; - a (℘ Component)
+;; - (Anything)
+;; The Anything variant is special. It stands for a /trusted/ "Any" pattern.
+
+;; A Qualified-Component is a Component with QMaps instead of Maps.
 ;; TODO?: Add a WeakMap option for automatic GC.
 
 (struct Space-reference (name) #:transparent)
 (struct Map (domain range) #:transparent)
+(struct QMap (domain domain-abstract? range) #:transparent)
 (struct ℘ (component) #:transparent)
+(struct Anything () #:transparent) (define -Anything (Anything))
 
 ;; TODO?: allow variants or components to have side-conditions
 (struct Variant (name Components) #:transparent)
-(struct Address (addr) #:transparent)
+;; Addresses specify which address space they are in, for store separation purposes.
+;; Addresses are classified as either structural or Egal:
+;;  - If Must Egal equal, then Must Structural equal. 
+;;    Otherwise, dereference both and check equality of product of values;
+;;    if all equalities are Must, the equality is must. If all are #f, then the equality is #f. Otherwise May.
+;;  - Addresses are Egal equal if syntactically equal (otherwise #f) and
+;     if the address cardinality is 1, Must match, else May match.
+(struct Address-Structural (space addr) #:transparent)
+(struct Address-Egal (space addr) #:transparent)
+
+;; A store is a map from Address to (Space-ref Name).
+;; store-spaces is a Map[Address-Space-Name,Store]
+;; OPT-OP: precalculate address spaces names and translate to numbers to use vectors instead of hashes.
+(struct State (term store-spaces) #:transparent)
+;; Create an initial state
+(define (mk-State tm) (State tm #hash()))
+
+(struct Abs-State (term σ μ) #:transparent)
+(define (mk-Abs-State tm) (Abs-State tm #hash() #hash()))
 
 ;; A Card is one of
 ;; - 0
 ;; - 1
 ;; - 'ω
 
+;; A Boolean♯ is one of
+;; - #t
+;; - #f
+;; - 'b.⊤
 
 ;; A Space is one of
 ;; - (User-Space List[Either[Variant,Component]] Boolean)
@@ -53,15 +81,14 @@ Allow stores (special)
 ;; - (Address-Space)
 ;; An external space has a predicate that decides membership,
 ;; a cardinality analysis for values of the space (may be given the abstract count [1] map), and
-;; a boolean that is #t iff the cardinality analysis is ever note 1.
+;; a boolean that is #t iff the cardinality analysis is ever not 1,
+;; an optional (Any Any [Addr ↦ Card] → Boolean♯) that quasi-decides equality given count info.
+;;  NOTE: if not given, equality falls back on structural equality plus cardinality analysis.
 ;;
 ;; A user space may not have duplicate variants.
 (struct User-Space (variants trust-recursion?) #:transparent)
-(struct Address-Space () #:transparent)
-(struct External-Space (pred cardinality imprecise?) #:transparent)
-
-;; A store is a map from Address-Space to (Space-ref Name).
-;; The 'State space must have a store in each variant.
+(struct Address-Space (space) #:transparent)
+(struct External-Space (pred cardinality imprecise? special-equality) #:transparent)
 
 ;; A reduction semantics is a List[Rule]
 ;; A rule is a (Rule Any Pattern Pattern List[Either[Binding,Side-condition]])
@@ -72,7 +99,7 @@ Allow stores (special)
 ;; A Pattern is one of
 ;; - a (Bvar Symbol Option[Space-name])
 ;; - an (Rvar Symbol)
-;; - a (Variant Name List[Pattern])
+;; - a (Variant Name Immutable-Vector[Pattern]) (morally)
 ;; - an atom
 ;; Bvar patterns bind on the left if not already mapped.
 ;; If mapped, an equality check occurs before matching continues.
@@ -80,61 +107,71 @@ Allow stores (special)
 ;; An Rvar refers to a pattern variable in scope.
 ;; NOTE: If the variable is mapped, an equality check will occur without checking
 ;;       if the value is in the specified Space (it is assumed to succeed).
+;; NOTE: I say morally for immutable, since Racket doesn't have the best support for immutable vectors.
+;;       We use standard vectors.
 (struct Bvar (x Space-name) #:transparent)
 (struct Rvar (x) #:transparent)
 (define ρ₀ (hash))
 (define ∅ (set))
+(define (Avar x) (Bvar x #f))
 
 ;; A DPattern (or "data pattern") is either
 ;; - an atom
-;; - a (Variant Name List[DPattern])
+;; - a (Variant Name Immutable-Vector[DPattern]) (morally)
 
 ;; A binding is one of
-;; - (PBinding Pattern Pattern)
-;; - (EBinding Pattern Expression)
-;; A PBinding is a shortcut for (EBinding pat (Term pat))
-(struct PBinding (lhs rpat) #:transparent)
-(struct EBinding (lhs rexpr) #:transparent)
+;; - (Binding Pattern Expression)
+;; - (Store-extend Expression Expression Boolean)
+(struct Binding (lhs rexpr) #:transparent)
+(struct Store-extend (key-expr val-expr trust-strong?) #:transparent)
+;; OPT-OP: allow specialized Store-extend and Alloc forms that know statically 
+;;         which address space they're using/producing addresses from/to
+;; By treating store extensions as bindings, we can control the store flow.
+;; We also don't need to make intermediate store names, which is a plus.
 
 ;; An Expression is one of
-;; - (Map-lookup Symbol Pattern Boolean Pattern)
-;; - (Map-extend Symbol Pattern Pattern Boolean)
-;; - (Map-lookup* Symbol Expression Boolean Expression)
-;; - (Map-extend* Symbol Expression Expression Boolean)
+;; - (Term Pattern)
+;; - Boolean
+;; - (Map-lookup Symbol Expression Boolean Expression)
+;; - (Map-extend Symbol Expression Expression Boolean)
+;; - (Store-lookup Expression)
 ;; - (Alloc Any)
 ;; - (Meta-function-call name Pattern)
 ;; - (If Expression Expression Expression)
 ;; - (Let List[Binding] Expression
-;; - Boolean
 ;; - (Equal Expression Expression)
+;; - (In-Dom Symbol Expression)
 ;; - (Empty-set)
 ;; - (Set-Union List[Expression])
 ;; - (Set-Add* Expression List[Expression])
 ;; - (In-Set Expression Expression)
-;; - (Term Pattern)
-(define (expression? e)
-  (or (Map-lookup? e) (Map-lookup*? e) (Map-extend? e) (Map-extend*? e)
-      (Alloc? e) (Meta-function-call? e)
-      (If? e) (boolean? e) (Equal? e) (Term? e)))
+
+;; A Qualified-Expression (or QExpression) is an Expression,
+;; except Alloc forms are QAlloc forms.
+
 ;; Notes: The boolean in Map-extend is whether the map should remain a strong update through abstraction.
 ;; This only matters for maps that have addresses in their domains.
 
-(struct Map-lookup (mvar key-pat default? dpat) #:transparent)
-(struct Map-extend (mvar key-pat val-pat trust-strong?) #:transparent)
-(struct Map-lookup* (mvar key-pat default? dpat) #:transparent)
-(struct Map-extend* (mvar key-pat val-pat trust-strong?) #:transparent)
+(struct Term (pat) #:transparent)
+
+(struct Map-lookup (mvar key-expr default? def-expr) #:transparent)
+(struct Map-extend (mvar key-expr val-expr trust-strong?) #:transparent)
+(struct Store-lookup (key-expr) #:transparent)
 (struct Meta-function-call (name arg-pat) #:transparent)
-(struct Alloc (hint) #:transparent)
+(struct Alloc () #:transparent)
+(struct QAlloc (hint) #:transparent)
 (struct If (g t e) #:transparent)
 (struct Equal (l r) #:transparent)
 (struct Let (bindings body-expr) #:transparent)
+(struct In-Dom (mvar key-expr) #:transparent)
 
-(struct Term (pat) #:transparent)
-
-(struct Set-union (exprs) #:transparent)
+(struct Set-Union (exprs) #:transparent)
 (struct Empty-set () #:transparent)
 (struct Set-Add* (set-expr exprs) #:transparent)
-(struct Set-In (set-expr expr) #:transparent)
+(struct In-Set (set-expr expr) #:transparent)
+
+(struct Unsafe-store-space-ref () #:transparent)
+(struct Unsafe-store-ref (space) #:transparent)
 
 ;; If expecting a set, make an arbitrary choice.
 (struct Choose (expr) #:transparent)
