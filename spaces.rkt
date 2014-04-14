@@ -39,12 +39,21 @@ Allow stores (special)
 
 (struct Space-reference (name) #:transparent)
 (struct Map (domain range) #:transparent)
-(struct QMap (domain domain-abstract? range) #:transparent)
+(struct QMap (domain domain-precision range) #:transparent)
 (struct ℘ (component) #:transparent)
 (struct Anything () #:transparent) (define -Anything (Anything))
 
+;; A member of QMap is one of
+;; - Dict
+;; - (absract-ffun Dict)
+;; - (discrete-ffun Dict) [still abstract, but has faster equality tests]
+(struct abstract-ffun (dict) #:transparent)
+(struct discrete-ffun (dict) #:transparent)
+
 ;; TODO?: allow variants or components to have side-conditions
 (struct Variant (name Components) #:transparent)
+;; Elements of Variant contain a pointer to the type of the variant.
+(struct variant (vpointer data) #:transparent)
 ;; Addresses specify which address space they are in, for store separation purposes.
 ;; Addresses are classified as either structural or Egal:
 ;;  - If Must Egal equal, then Must Structural equal. 
@@ -64,6 +73,11 @@ Allow stores (special)
 
 (struct Abs-State (term σ μ) #:transparent)
 (define (mk-Abs-State tm) (Abs-State tm #hash() #hash()))
+
+;; A Precision-Classifier is one of
+;; - 'concrete [and thus discrete]
+;; - 'discrete-abstraction [considered abstract, but still gets structural equality]
+;; - 'abstract [must use slow-path equality checks]
 
 ;; A Card is one of
 ;; - 0
@@ -88,7 +102,12 @@ Allow stores (special)
 ;; A user space may not have duplicate variants.
 (struct User-Space (variants trust-recursion?) #:transparent)
 (struct Address-Space (space) #:transparent)
-(struct External-Space (pred cardinality imprecise? special-equality) #:transparent)
+(struct External-Space (pred cardinality precision special-equality) #:transparent)
+
+;; A member of an External space is one of
+;; - (external external-space Any)
+;; - Any [such that the pred of some external space in the language is satisfied]
+(struct external (type v) #:transparent)
 
 ;; A reduction semantics is a List[Rule]
 ;; A rule is a (Rule Any Pattern Pattern List[Either[Binding,Side-condition]])
@@ -99,7 +118,10 @@ Allow stores (special)
 ;; A Pattern is one of
 ;; - a (Bvar Symbol Option[Space-name])
 ;; - an (Rvar Symbol)
-;; - a (Variant Name Immutable-Vector[Pattern]) (morally)
+;; - a (variant Variant Immutable-Vector[Pattern]) [morally]
+;; - TODO: a (set-with Pattern Pattern) [for structural termination arguments]
+;; - TODO: a (map-with QMap Pattern Pattern Pattern) [for structural termination arguments]
+;;   XXX: how to handle May-present entries?
 ;; - an atom
 ;; Bvar patterns bind on the left if not already mapped.
 ;; If mapped, an equality check occurs before matching continues.
@@ -109,34 +131,48 @@ Allow stores (special)
 ;;       if the value is in the specified Space (it is assumed to succeed).
 ;; NOTE: I say morally for immutable, since Racket doesn't have the best support for immutable vectors.
 ;;       We use standard vectors.
-(struct Bvar (x Space-name) #:transparent)
+;; NOTE: map-with needs a pointer to the map's type for proper matching.
+(struct Bvar (x Space) #:transparent)
 (struct Rvar (x) #:transparent)
 (define ρ₀ (hash))
 (define ∅ (set))
+(define ⦃∅⦄ (set ∅))
 (define (Avar x) (Bvar x #f))
 
 ;; A DPattern (or "data pattern") is either
 ;; - an atom
-;; - a (Variant Name Immutable-Vector[DPattern]) (morally)
+;; - a (variant Variant Immutable-Vector[DPattern]) [morally]
+;; - a (discrete-ffun Dict)
+;; - a (abstract-ffun Dict)
+;; - a Dict [trusted to have a concrete domain]
+;; - an (Address-Structural _)
+;; - an (Address-Egal _)
+;; - a Set[DPattern]
 
-;; A binding is one of
-;; - (Binding Pattern Expression)
-;; - (Store-extend Expression Expression Boolean)
+;; A Top-level-form is one of
+;; - (Top-level-binding Pattern Expression)
+;; - (Store-extend Expression Expression Boolean Boolean)
+;; - (SAlloc Symbol)
+;; - (MAlloc Symbol)
+;; - (QSAlloc Symbol _)
+;; - (QMAlloc Symbol _)
+
 (struct Binding (lhs rexpr) #:transparent)
-(struct Store-extend (key-expr val-expr trust-strong?) #:transparent)
+;; Make a syntactic distinction between allocations that expect to have 
+;; structural equality (SAlloc) or Egal/Mutable equality (MAlloc)
+
 ;; OPT-OP: allow specialized Store-extend and Alloc forms that know statically 
 ;;         which address space they're using/producing addresses from/to
 ;; By treating store extensions as bindings, we can control the store flow.
 ;; We also don't need to make intermediate store names, which is a plus.
 
+(struct expression (pure?) #:transparent)
 ;; An Expression is one of
 ;; - (Term Pattern)
 ;; - Boolean
 ;; - (Map-lookup Symbol Expression Boolean Expression)
 ;; - (Map-extend Symbol Expression Expression Boolean)
 ;; - (Store-lookup Expression)
-;; - (Alloc Any)
-;; - (Meta-function-call name Pattern)
 ;; - (If Expression Expression Expression)
 ;; - (Let List[Binding] Expression
 ;; - (Equal Expression Expression)
@@ -145,36 +181,56 @@ Allow stores (special)
 ;; - (Set-Union List[Expression])
 ;; - (Set-Add* Expression List[Expression])
 ;; - (In-Set Expression Expression)
+;; and the possibly impure
+;; - (Meta-function-call name Pattern)
+;; - (Store-extend Expression Expression Boolean)
+;; - (SAlloc)
+;; - (MAlloc)
+;; - (QSAlloc _)
+;; - (QMAlloc _)
 
-;; A Qualified-Expression (or QExpression) is an Expression,
-;; except Alloc forms are QAlloc forms.
+(struct (Store-extend expression) (key-expr val-expr trust-strong?) #:transparent)
 
 ;; Notes: The boolean in Map-extend is whether the map should remain a strong update through abstraction.
 ;; This only matters for maps that have addresses in their domains.
 
-(struct Term (pat) #:transparent)
+(struct (Term expression) (pat) #:transparent)
 
-(struct Map-lookup (mvar key-expr default? def-expr) #:transparent)
-(struct Map-extend (mvar key-expr val-expr trust-strong?) #:transparent)
-(struct Store-lookup (key-expr) #:transparent)
-(struct Meta-function-call (name arg-pat) #:transparent)
-(struct Alloc () #:transparent)
-(struct QAlloc (hint) #:transparent)
-(struct If (g t e) #:transparent)
-(struct Equal (l r) #:transparent)
-(struct Let (bindings body-expr) #:transparent)
-(struct In-Dom (mvar key-expr) #:transparent)
+(struct (Map-lookup expression) (mvar key-expr default? def-expr) #:transparent)
+(struct (Map-extend expression) (mvar key-expr val-expr trust-strong?) #:transparent)
+(struct (Store-lookup expression) (key-expr) #:transparent)
 
-(struct Set-Union (exprs) #:transparent)
-(struct Empty-set () #:transparent)
-(struct Set-Add* (set-expr exprs) #:transparent)
-(struct In-Set (set-expr expr) #:transparent)
+(struct (Meta-function-call expression) (name arg-pat) #:transparent)
 
-(struct Unsafe-store-space-ref () #:transparent)
-(struct Unsafe-store-ref (space) #:transparent)
+(struct (If expression) (g t e) #:transparent)
+(struct (Equal expression) (l r) #:transparent)
+(struct (Let expression) (bindings body-expr) #:transparent)
+(struct (In-Dom expression) (mvar key-expr) #:transparent)
+
+(struct (Set-Union expression) (exprs) #:transparent)
+(struct (Empty-set expression) () #:transparent)
+(struct (Set-Add* expression) (set-expr exprs) #:transparent)
+(struct (In-Set expression) (set-expr expr) #:transparent)
+
+(struct (Unsafe-store-space-ref expression) () #:transparent)
+(struct (Unsafe-store-ref expression) (space) #:transparent)
 
 ;; If expecting a set, make an arbitrary choice.
-(struct Choose (expr) #:transparent)
+(struct (Choose expression) (expr) #:transparent)
+
+(struct (SAlloc expression) () #:transparent)
+(struct (MAlloc expression) () #:transparent)
+;; Qualified forms.
+(struct (QSAlloc expression) (hint) #:transparent)
+(struct (QMAlloc expression) (hint) #:transparent)
+
+;; When evaluating top-level-forms, we can allocate addresses and change the store.
+;; When expressions have these side-effects, we wrap the contents in the following,
+;; which turn out to be isomorphic to the state representations.
+(define Result/effect State)
+(define-syntax Result/effect (make-rename-transformer #'State))
+(define Abs-Result/effect Abs-State)
+(define-syntax Abs-Result/effect (make-rename-transformer #'Abs-State))
 
 ;; the definition of a meta-function is like a reduction semantics,
 ;; but treated like a functional relation.
@@ -193,7 +249,6 @@ Allow stores (special)
 
 ;; A unique value to distinguish lookup failures.
 (struct Unmapped ()) (define -unmapped (Unmapped))
-
 
 ;; A Component-Address is one of
 ;; - '℘

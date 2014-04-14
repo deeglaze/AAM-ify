@@ -8,39 +8,46 @@ in the spaces.rkt format.
 (require racket/match racket/set racket/dict racket/promise
          racket/list
          racket/trace
-         racket/unsafe/ops
+         racket/unit
          "spaces.rkt"
          "shared.rkt")
 (provide c/apply-reduction-relation
          c/apply-reduction-relation*)
 
-;; c/match : Language → Pattern DPattern Map[Symbol, DPattern] → Option[Map[Symbol, DPattern]]
+(define-unit concrete-semantics@
+  (import language-parms^)
+  (export language-impl^)
+
+  ;; c/match : Language → Pattern DPattern Map[Symbol, DPattern] → Option[Map[Symbol, DPattern]]
 ;; Concrete match. References' ∀? component does not matter.
 ;; There is at most one match.
 ;; If there is a match, the result is the binding environment. Otherwise #f.
-(define ((c/match L) pattern data ρ store-spaces)
+(define (c/match pattern data ρ store-spaces)
   (define (inner pattern data ρ)
     (match* (pattern data)
-      [((Bvar x Space-name) d)
+      [((Bvar x Space) d)
        (match (dict-ref ρ x -unmapped)
          [(== -unmapped eq?)
-          (and (if Space-name (in-space? d L Space-name) #t)
+          (and (if Space (in-space? L Space d) #t)
                (dict-set ρ x d))]
-         [other (if (equal? other d)
-                    ρ
-                    #f)])]
-      [((Variant name comps) (Variant name data))
-       ;; INVARIANT: Variants with the same name always have the same length.
-       (define len (vector-length comps))
-       (define (recur ind ρ)
-         (cond
-          [(= ind len) ρ]
-          [else
-           (define comp (unsafe-vector-ref comps ind))
-           (define d (unsafe-vector-ref data ind))
-           (define ρop (inner comp d ρ))
-           (and ρop (recur (add1 ind) ρop))]))
-       (recur 0 ρ)]
+         [other (cond
+                 [(equal? other d)
+                  ρ]
+                 [else
+                  (log-info "Match failure: non-linear binding mismatch ~a ~a" other d)
+                  #f])])]
+      [((variant v comps) (variant v* data))
+       (cond
+        [(equal? v v*)
+         ;; INVARIANT: Variants with the same name always have the same length.
+         (define len (vector-length comps))
+         (for/fold ([ρ ρ]) ([comp (in-vector comps)]
+                            [d (in-vector data)])
+           (define ρ* (inner comp d ρ))
+           #:final (not ρ*)
+           ρ*)]
+        [else (log-info "Match failure: variant mismatch ~a ~a" pattern data)
+              #f])]
       [((? Rvar?) x) (error 'c/match "Unexpected reference in match pattern ~a" x)]
 
       [((? Address-Structural? a₀) (? Address-Structural? a₁))
@@ -65,8 +72,7 @@ in the spaces.rkt format.
 ;; c/expression-eval : Language Expression Map[Symbol,DPattern] Map[Symbol,Meta-function] → ℘(DPattern)
 ;; Concrete evaluation of expressions. Returns entire set of possible evaluations
 ;; due to Choose expressions.
-(define (c/expression-eval* L e ρ store-spaces Ξ)
-  (define Lmatch (c/match L))
+(define (expression-eval e ρ store-spaces)
   (let c/expression-eval* ([e e] [ρ ρ])
     (define (eval* e) (c/expression-eval* e ρ))
     (match e
@@ -95,9 +101,9 @@ in the spaces.rkt format.
 
       [(Meta-function-call f arg)
        ;; meta-functions also have non-deterministic choice.
-       (c/meta-function-eval L
-                             (hash-ref Ξ f (λ () (error "Unknown meta-function ~a" f)))
-                             (pattern-eval arg ρ))]
+       (mf-eval L
+                (hash-ref Ξ f (λ () (error "Unknown meta-function ~a" f)))
+                (pattern-eval arg ρ))]
       [(If g t e)
        (define guard (eval* g))
        (cond [(set-member? guard #f)
@@ -114,14 +120,11 @@ in the spaces.rkt format.
 
       ;; Really let with non-linear pattern weirdness.
       [(Let '() bexpr) (eval* bexpr)]
-      [(Let (cons binding bindings) bexpr)
-       (match-define (Binding pat cexpr) binding)
+      [(Let (cons (Binding pat cexpr) bindings) bexpr)
        (for*/union ([cv (in-set (eval* cexpr))]
-                    [ρ* (in-value (Lmatch pat cv ρ store-spaces))]
+                    [ρ* (in-value (c/match pat cv ρ store-spaces))]
                     #:when ρ*)
          (c/expression-eval* (Let bindings bexpr) ρ*))]
-
-      [(or (? Alloc?) (? QAlloc?)) (set (Address-Egal 'standard (gensym)))]
 
       [(Term pat) (set (pattern-eval pat ρ))]
 
@@ -132,24 +135,21 @@ in the spaces.rkt format.
 
       [(Set-Union exprs)
        (for/set ([args (in-set (list-of-sets→set-of-lists
-                                             (map eval* exprs)))])
-         ;; XXX: Probably shouldn't be an error
-         (unless (andmap set? args)
-           (error 'expression-eval "Cannot union non-set ~a" args))
+                                             (map eval* exprs)))]
+                 #:when (andmap set? args))
          (apply set-union args))]
       [(Set-Add* set-expr exprs)
-       (for/set ([args (in-set (list-of-sets→set-of-lists
-                                             (map eval* (cons set-expr exprs))))])
-         (define setv (first args))
-         ;; XXX: Probably shouldn't be an error
-         (unless (set? setv) (error 'expression-eval "Cannot add to non-set ~a" setv))
+       (for*/set ([args (in-set (list-of-sets→set-of-lists
+                                 (map eval* (cons set-expr exprs))))]
+                  [setv (in-value setv)]
+                  #:when (set? setv))
          (set-add* setv (rest args)))]
       [(In-Set set-expr expr)
        (for*/set ([setv (in-set (eval* set-expr))]
                   #:when (set? setv)
                   [v (in-set (eval* expr))])
          (set-member? setv v))]
-      [(Empty-set) ∅]
+      [(Empty-set) ⦃∅⦄]
 
       ;; We get a set of results from expr. We expect these results to be sets.
       ;; We want to embody any (all) choices from these sets, so we flatten them into
@@ -158,13 +158,12 @@ in the spaces.rkt format.
 
       [bad (error 'expr-eval "Bad expression ~a" bad)])))
 
-;; c/rule-eval* : Rule Map[Symbol,DPattern] DPattern Map[Symbol,Meta-function] → ℘(DPattern)
+;; rule-eval : Rule Map[Symbol,DPattern] DPattern Map[Symbol,Meta-function] → ℘(DPattern)
 ;; Evaluate a rule on some concrete term and return possible RHSs.
-(define (c/rule-eval* L rule st Ξ)
-  (define Lmatch (c/match L))
+(define (rule-eval rule st)
   (match-define (Rule name lhs rhs binding-side-conditions) rule)
   (match-define (State d store-spaces) st)
-  (match (Lmatch lhs d ρ₀ store-spaces)
+  (match (c/match lhs d ρ₀ store-spaces)
     [#f ∅]
     [ρ (let bind-and-check ([bscs binding-side-conditions]
                             [ρ ρ]
@@ -173,19 +172,24 @@ in the spaces.rkt format.
            [(cons bsc bscs)
             (match bsc
               [(Binding lhs* rhs*)
-               (for*/union ([rv (in-set (c/expression-eval* L rhs* ρ store-spaces Ξ))]
-                            [ρop (in-value (Lmatch lhs* rv ρ store-spaces))]
+               (for*/union ([rv (in-set (expression-eval rhs* ρ store-spaces))]
+                            [ρop (in-value (c/match lhs* rv ρ store-spaces))]
                             #:when ρop)
                  (bind-and-check bscs ρop store-spaces))]
               [(Store-extend key-expr val-expr _)
-               (define kvs (c/expression-eval* L key-expr ρ store-spaces Ξ))
-               (define vvs (c/expression-eval* L val-expr ρ store-spaces Ξ))
+               (define kvs (expression-eval* key-expr ρ store-spaces))
+               (define vvs (expression-eval* val-expr ρ store-spaces))
                (for*/union ([kv (in-set kvs)]
                             [vv (in-set vvs)])
                  (bind-and-check bscs ρ (store-set store-spaces kv vv)))]
+              [(or (SAlloc x) (QSAlloc x _))
+               (bind-and-check bscs (hash-set ρ x (Address-Structural 'standard (gensym))) store-spaces)]
+              [(or (MAlloc x) (QMAlloc x _))
+               (bind-and-check bscs (hash-set ρ x (Address-Egal 'standard (gensym))) store-spaces)]
+
               ;; Anything else is considered an expression that must be truish to continue.
               [expr
-               (define v (c/expression-eval* L expr ρ store-spaces Ξ))
+               (define v (expression-eval expr ρ store-spaces))
                ;; If only #f is a possibility, stop. Otherwise keep going.
                (if (and (= (set-count expr) 1)
                         (set-member? expr #f))
@@ -196,13 +200,13 @@ in the spaces.rkt format.
 
 ;; TODO?: Add ability to do safety checks on input/output belonging to a
 ;;        specified Space.
-
-(define (c/meta-function-eval L mf argd Ξ)
+(define (mf-eval mf argd)
   (match-define (Meta-function name rules trust/conc _) mf)
   (if trust/conc
       (trust/conc argd)
       ;; Use the first rule that matches.
-      (for/or ([rule (in-list rules)]) (c/rule-eval* L rule argd Ξ))))
+      (for/or ([rule (in-list rules)]) (rule-eval rule argd))))
+  )
 
 (define (c/apply-reduction-relation L rules Ξ)
   (apply-reduction-relation c/rule-eval* L rules Ξ))

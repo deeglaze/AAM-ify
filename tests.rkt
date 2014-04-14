@@ -1,81 +1,99 @@
 #lang racket/base
 (require "spaces.rkt" "shared.rkt" "transform.rkt" "concrete.rkt"
-         racket/pretty)
+         (for-syntax syntax/parse racket/base)
+         racket/pretty racket/set racket/match)
+
+(define-syntax log-thread
+  (syntax-parser
+    [(_ kind (~optional (~seq #:file path:expr (~bind [port (λ (p body)
+                                                               #`(call-with-output-file*
+                                                                  path
+                                                                  (λ (#,p) #,body)
+                                                                  #:exists 'replace))]))
+                        #:defaults ([port (λ (p body) #`(let ([#,p (current-output-port)]) #,body))])))
+     #`(let ([lr (make-log-receiver (current-logger) kind)])
+         (thread (λ () 
+                    #,((attribute port)
+                       #'p
+                       #'(let loop () (define vs (sync lr)) (write vs p) (newline p) (loop))))))]))
 
 (define (rule-lookup rules name)
   (for/or ([rule (in-list rules)] #:when (equal? name (Rule-name rule))) rule))
 
+(define vref (Variant 'Ref (vector (Space-reference 'Variable))))
+(define vapp (Variant 'App (vector (Space-reference 'Expr)
+                                   (Space-reference 'Expr))))
+(define vlam (Variant 'Lam (vector (Space-reference 'Variable)
+                                   (Space-reference 'Expr))))
+(define vclo (Variant 'Closure (vector (Space-reference 'Expr) (Space-reference 'Env))))
+;;; REFINEMENT 
+(define vclov (Variant 'Closure (vector (Space-reference 'Pre-value)
+                                       (Space-reference 'Env))))
+(define vkar (Variant 'Ar (vector (Space-reference 'Expr) (Space-reference 'Env))))
+(define vkfn (Variant 'Fn (vector (Space-reference 'Value))))
+(define vmt (Variant 'mt #()))
+(define vkcons (Variant 'Kcons (vector (Space-reference 'Frame)
+                                       (Space-reference 'Kont))))
+(define vstate (Variant 'State (vector (Space-reference 'With-env) (Space-reference 'Kont))))
 (define CESK-lang
   (Language
    'LC/CESK
    (hash
     'Variable (External-Space symbol? (λ (e) 1) #f #f)
     'Env (User-Space (list (Map (Space-reference 'Variable) (Address-Space 'bindings))) #f)
-    'Expr (User-Space (list (Variant 'Ref (vector (Space-reference 'Variable)))
-                            (Variant 'App (vector (Space-reference 'Expr)
-                                                (Space-reference 'Expr)))
-                            (Space-reference 'Pre-value))
-                      #t)
-    'Pre-value (User-Space (list (Variant 'Lam (vector (Space-reference 'Variable)
-                                                     (Space-reference 'Expr))))
-                           #t)
-    'Value (User-Space (list (Variant 'Closure
-                                      (vector (Space-reference 'Pre-value)
-                                            (Space-reference 'Env))))
-                       #f)
-    'Frame (User-Space (list (Variant 'Ar (vector (Space-reference 'Expr) (Space-reference 'Env)))) #f)
-    'Kont (User-Space (list (Variant 'mt #())
-                            (Variant 'Kcons (vector (Space-reference 'Frame)
-                                                  (Space-reference 'Kont))))
-                      #f))))
+    'Expr (User-Space (list vref vapp (Space-reference 'Pre-value)) #t)
+    'With-env (User-Space (list vclo) #f)
+    'Pre-value (User-Space (list vlam) #t)
+    'Value (User-Space (list vclov) #f)
+    'Frame (User-Space (list vkar vkfn) #f)
+    'Kont (User-Space (list vmt vkcons) #f)
+    'States (User-Space (list vstate) #f))))
 
 (define CESK-reduction
   (list
    (Rule 'variable-lookup
-         (Variant 'State
+         (variant vstate
                   (vector
-                   (Variant 'Closure (vector (Variant 'Ref (vector (Avar 'x)))
-                                             (Avar 'ρ)))
+                   (variant vclo (vector (variant vref (vector (Avar 'x)))
+                                         (Avar 'ρ)))
                    (Avar 'κ)))
-         (Variant 'State
-                  (vector (Rvar 'v)
-                          (Rvar 'κ)))
+         (variant vstate (vector (Rvar 'v) (Rvar 'κ)))
          (list (Binding (Avar 'v) (Store-lookup (Map-lookup 'ρ (Term (Rvar 'x)) #f #f)))))
    (Rule 'application
-         (Variant 'State
+         (variant vstate
                   (vector
-                   (Variant 'Closure (vector (Variant 'App (vector (Avar 'e0) (Avar 'e1)))
-                                           (Avar 'ρ)))
+                   (variant vclo (vector (variant vapp (vector (Avar 'e0) (Avar 'e1)))
+                                         (Avar 'ρ)))
                    (Avar 'κ)))
-         (Variant 'State
-                  (vector (Variant 'Closure (vector (Rvar 'e0) (Rvar 'ρ)))
-                        (Variant 'Kcons
-                                 (vector (Variant 'Ar (vector (Rvar 'e1) (Rvar 'ρ)))
-                                       (Rvar 'κ)))))
+         (variant vstate
+                  (vector (variant vclo (vector (Rvar 'e0) (Rvar 'ρ)))
+                          (variant vkcons
+                                   (vector (variant vkar (vector (Rvar 'e1) (Rvar 'ρ)))
+                                           (Rvar 'κ)))))
          '())
    (Rule 'argument-eval
-         (Variant 'State
+         (variant vstate
                   (vector (Bvar 'v 'Value)
-                        (Variant 'Kcons (vector (Variant 'Ar (vector (Avar 'e) (Avar 'ρ)))
-                                              (Avar 'κ)))))
-         (Variant 'State
-                  (vector (Variant 'Closure (vector (Rvar 'e) (Rvar 'ρ)))
-                        (Variant 'Kcons (vector (Variant 'Fn (vector (Rvar 'v)))
-                                              (Rvar 'κ)))))
+                          (variant vkcons (vector (variant vkar (vector (Avar 'e) (Avar 'ρ)))
+                                                  (Avar 'κ)))))
+         (variant vstate
+                  (vector (variant vclo (vector (Rvar 'e) (Rvar 'ρ)))
+                          (variant vkcons (vector (variant vkfn (vector (Rvar 'v)))
+                                                  (Rvar 'κ)))))
          '())
    (Rule 'function-eval
-         (Variant 'State
+         (variant vstate
                   (vector (Bvar 'v 'Value)
-                        (Variant 'Kcons
-                                 (vector (Variant 'Fn
-                                                (vector (Variant 'Closure
-                                                               (vector (Variant 'Lam (vector (Avar 'x) (Avar 'e)))
-                                                                     (Avar 'ρ)))))
-                                       (Avar 'κ)))))
-         (Variant 'State
-                  (vector (Variant 'Closure (vector (Rvar 'e) (Rvar 'ρ*)))
+                          (variant vkcons
+                                 (vector (variant vkfn
+                                                (vector (variant vclov
+                                                                 (vector (variant vlam (vector (Avar 'x) (Avar 'e)))
+                                                                         (Avar 'ρ)))))
+                                         (Avar 'κ)))))
+         (variant vstate
+                  (vector (variant vclo (vector (Rvar 'e) (Rvar 'ρ*)))
                           (Rvar 'κ)))
-         (list (Binding (Avar 'a) (Alloc))
+         (list (MAlloc 'a)
                (Binding (Avar 'ρ*) (Map-extend 'ρ (Term (Rvar 'x)) (Term (Rvar 'a)) #f))
                (Store-extend (Term (Rvar 'a)) (Term (Rvar 'v)) #f)))))
 
@@ -91,10 +109,15 @@
 
 (define (inject L e)
   (define term (sexp-to-dpattern/check e 'Expr L))
-  (mk-State (Variant 'State (vector (Variant 'Closure (vector term #hash()))
-                                    (Variant 'mt '())))))
+  (mk-State (variant vstate (vector (variant vclo (vector term #hash()))
+                                    (variant vmt #())))))
 (define (run L expr)
   ((c/apply-reduction-relation* CESK-lang CESK-reduction #hash()) (inject L expr)))
-
-(run CESK-lang '(App (Lam x (Ref x))
-                     (Lam y (Ref y))))
+(parameterize ([current-logger (make-logger 'match-info)])
+ (log-thread 'info)
+ (for/list ([out (in-set (run CESK-lang '(App (Lam x (Ref x))
+                                              (Lam y (Ref y)))))])
+   (match-define (State tm store-spaces) out)
+   (printf "(State ~a ~a)~%" (dpattern->sexp tm) store-spaces)
+   out))
+(sleep 2)

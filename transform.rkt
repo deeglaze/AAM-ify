@@ -196,7 +196,9 @@ FIXMEs:
              ;; Non-recursive references are not replaced, even if the spaces are abstract.
              (values comp (hash-ref abstract-spaces name (λ () (error 'replace-component "Impossible")))))]
         [(℘ comp) (replace-recursive-mentions-in-component comp)]
-        [(Map domain range)
+        [(or (Map domain range)
+             ;; Fix qualification if one given.
+             (QMap domain _ range))
          (define-values (abs-dom dom-abs?)
            (replace-recursive-mentions-in-component domain))
          (define-values (abs-range rng-abs?)
@@ -206,6 +208,7 @@ FIXMEs:
          ;; Additionally, the Map now becomes weak, so b is lifted implicitly to a powerset domain.
          (cond [dom-abs? (values (QMap abs-dom #t (℘ abs-range)) #t)]
                [else (values (QMap abs-dom #f abs-range) rng-abs?)])]
+
         [(Address-Space _) (values comp #t)]))
 
     (match variant-or-component
@@ -367,7 +370,7 @@ FIXMEs:
 ;;  - Repeat the process for Pat.
 (define (emit-binding-sc rec-addrs pat)
   (define new-bvar (gensym))
-  (if (Variant? pat)
+  (if (variant? pat)
       (let-values ([(pat* binding-scs) (flatten-pattern rec-addrs pat '() #f)])
         (values (Bvar new-bvar (Address-Space 'AAM))
                 (cons (Binding pat* (Choose (Store-lookup (Term (Rvar new-bvar)))))
@@ -381,9 +384,9 @@ FIXMEs:
          (emit-binding-sc rec-addrs pat)]
         [else
          (match pat
-           [(Variant name pats)
+           [(variant v pats)
             ;; Trusted spaces' variants are all given an empty set of recursive references.
-            (define rec-positions (hash-ref rec-addrs name ∅))
+            (define rec-positions (hash-ref rec-addrs (Variant-name v) ∅))
             (define pats* (make-vector (vector-length pats)))
             ;; OPT-OP: consider an RRB-tree for binding-scs if it's a bottleneck.
             (define binding-scs*
@@ -393,16 +396,16 @@ FIXMEs:
                 (define indexed-addresses
                   (for/set ([pos (in-set rec-positions)]
                             #:when (match pos
-                                     [(cons (Variant-field (== name eq?)
+                                     [(cons (Variant-field (== v)
                                                            (== i equal?))
                                             rest) #t]
                                      [_ #f]))
                     pos))
                 (define-values (pat* binding-scs*)
-                  (flatten-pattern rec-addrs pat (list (Variant-field name i)) indexed-addresses))
+                  (flatten-pattern rec-addrs pat (list (Variant-field v i)) indexed-addresses))
                 (unsafe-vector-set! pats* i pat*)
                 (append (reverse binding-scs*) binding-scs)))
-            (values (Variant name pats*)
+            (values (variant v pats*)
                     (reverse binding-scs*))]
            [(Rvar x) (error 'flatten-pattern "Unexpected reference in match pattern ~a" x)]
            [other (values other '())])]))
@@ -424,12 +427,12 @@ FIXMEs:
       (define store** (gensym 'σ))
       (values (Rvar address-var)
               (append store-updates
-                      (list (Binding (Avar address-var) (QAlloc (cons alloc-tag (reverse rev-addr))))
+                      (list (Binding (Avar address-var) (QSAlloc (cons alloc-tag (reverse rev-addr))))
                             (Store-extend (Term (Rvar address-var)) (Term pat*)))))]
      [else
       (match tm
         [(Bvar x _) (error 'abstract-rule "Rule RHS may not bind ~a" tm)]
-        [(Variant vname pats)
+        [(variant v pats)
          (define len (vector-length pats))
          (define pats* (make-vector len))
          ;; TODO?: error/warn if space defining vname is trusted.
@@ -440,15 +443,15 @@ FIXMEs:
               [(= i len) (reverse rev-store-updates)]
               [else
                (define pat (unsafe-vector-ref pats i))
-               (define vfield (Variant-field vname i))
+               (define vfield (Variant-field v i))
                (define-values (pat* store-updates*)
-                 (recur vname (cons vfield rev-addr)
+                 (recur (Variant-name v) (cons vfield rev-addr)
                         (list vfield)
                         pat))
                (unsafe-vector-set! pats* i pat*)
                (rewrite-pats (add1 i)
                              (append (reverse store-updates*) rev-store-updates))])))
-         (values (Variant vname pats*) store-updates)]
+         (values (variant v pats*) store-updates)]
         [other (values other '())])])))
 
 (define (abstract-meta-function L rec-addrs ΞΔ mf)

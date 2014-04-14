@@ -4,14 +4,16 @@
 Utility functions and specific functions that are shared between concrete and abstract AAM
 |#
 
-(require racket/match racket/set racket/dict racket/unsafe/ops "spaces.rkt"
+(require racket/match racket/set racket/dict "spaces.rkt"
+         racket/unit
          racket/trace)
 (provide unbound-map-error
          pattern-eval
          apply-reduction-relation
          apply-reduction-relation*
-         store-ref store-set
-         in-space?
+         apply-reduction-relation*/memo
+         store-ref store-set store-add
+         in-space? in-variant? in-component?
          hash-join
          hash-add
          hash-union
@@ -19,8 +21,23 @@ Utility functions and specific functions that are shared between concrete and ab
          for*/union
          set-add*
          list-of-sets→set-of-lists
-         sexp-to-dpattern/check)
+         sexp-to-dpattern/check
+         dpattern->sexp)
 
+(define-signature language-parms^
+  (L ;; Language
+   alloc ;; State [Any] → Any
+   Ξ ;; Map[Symbol,Meta-function]
+   ))
+;; A Store-Space is a Map[Address-Space-Name,Map[Any,DPattern]]
+;; An Abs-Count is a Map[Any,Card]
+(define-signature language-impl^
+  (expression-eval ;; Expression Store-Space [Abs-Count] → Set[DPattern]
+   rule-eval ;; Rule Store-Space [Abs-]State → Set[[Abs-]State]
+   mf-eval ;; Meta-function DPattern [Abs-Count] → Set[[Abs-]Result/effect]
+   ))
+
+(define-syntax-rule (implies p q) (if p q #t))
 (define (unbound-map-error who m) (λ () (error who "Map unbound ~a" m)))
 
 (define (store-ref store-spaces k)
@@ -31,23 +48,26 @@ Utility functions and specific functions that are shared between concrete and ab
                addr
                (λ () (error 'store-ref "Unmapped address ~a" k)))]))
 
-(define (store-set store-spaces k v)
-  (match k
-    [(or (Address-Structural space addr)
-         (Address-Egal space addr))
-     (hash-set store-spaces
-               space
-               (hash-set (hash-ref store-spaces space #hash())
-                         addr v))]))
+(define (store-op op)
+  (λ (store-spaces k v)
+     (match k
+       [(or (Address-Structural space addr)
+            (Address-Egal space addr))
+        (hash-set store-spaces
+                  space
+                  (op (hash-ref store-spaces space #hash()) addr v))])))
+
+(define store-set (store-op hash-set))
+(define store-add (store-op hash-add))
 
 ;; pattern-eval : Pattern Map[Symbol,DPattern] → DPattern
 ;; Concretize a pattern given an environment of bindings.
 (define (pattern-eval pat ρ)
   (match pat
     [(Rvar x) (hash-ref ρ x (λ () (error 'pattern-eval "Unbound pattern variable ~a" x)))]
-    [(Variant name pats) (Variant name (for/vector #:length (vector-length pats)
-                                                   ([pat (in-vector pats)])
-                                         (pattern-eval pat ρ)))]
+    [(variant var pats) (variant var (for/vector #:length (vector-length pats)
+                                                 ([pat (in-vector pats)])
+                                          (pattern-eval pat ρ)))]
     [(Bvar _ _) (error 'pattern-eval "Cannot eval a binding pattern ~a" pat)]
     [atom atom]))
 
@@ -59,62 +79,82 @@ Utility functions and specific functions that are shared between concrete and ab
     [(? set-empty?) (set x)]
     [outs (for/union ([term* (in-set outs)]) (extend-indefinitely F term*))]))
 
-(define ((apply-reduction-relation* rule-eval L rules Ξ) term)
+(define (apply-reduction-relation* rule-eval L rules Ξ)
   (define reduce (apply-reduction-relation rule-eval L rules Ξ))
-  (extend-indefinitely reduce term))
+  (λ (term) (extend-indefinitely reduce term)))
+
+(define (apply-reduction-relation*/memo rule-eval L rules Ξ)
+  (define reduce (apply-reduction-relation rule-eval L rules Ξ))
+  (λ (term)
+     (define seen (mutable-set))
+     (let fix ([term term])
+       (cond
+        [(set-member? seen term) ∅]
+        [else
+         (set-add! seen term)
+         (match (reduce term)
+           [(? set-empty?) (set term)]
+           [outs (for/union ([term* (in-set outs)]) (fix term*))])]))))
 
 ;; in-space? : DPattern Language Space-name → Boolean
 ;; Decide whether a DPattern d is in Space space-name, which is defined in Language L.
-(define (in-space? d L space-name)
-  (match-define (Language _ spaces) L)
-  (define (in-space? space-name d)
-    (define space
-      (hash-ref spaces space-name (λ () (error 'in-space? "Undefined space ~a in language ~a"
-                                          space-name
-                                          (Language-name L)))))
-    (match space
-      [(User-Space variants-or-components _)
-       (for/or ([var (in-list variants-or-components)])
-         (cond [(Variant? var) (in-variant? var d)]
-               [(Space-reference? var) (in-space? (Space-reference-name var) d)]
-               [else (in-component? var d)]))]
-      [(Address-Space space)
-       (match d
-         [(or (Address-Structural (== space eq?) _)
-              (Address-Egal (== space eq?) _)) #t]
-         [_ #f])]
-      ;; XXX: should external space predicates be allowed to return 'b.⊤?
-      [(External-Space pred _ _ _) (pred d)]
-      [_ (error 'in-space? "Bad space ~a" space)]))
+(define (in-space-ref? L space-name d)
+  (match-define (Language lang-name spaces) L)
+  (define space
+    (hash-ref spaces space-name
+              (λ () (error 'in-space? "Undefined space ~a in language ~a"
+                           space-name
+                           lang-name))))
+  (in-space? L space d))
 
-  (define (in-component? comp d)
-    (match comp
-      [(Space-reference name) (in-space? name d)]
-      [(Map domain range)
-       (and (dict? d)
-            (for/and ([(k v) (in-dict d)])
-              (and (in-component? domain k)
-                   (in-component? range v))))]
-      [(℘ comp)
-       (and (set? d)
-            (for/and ([v (in-set d)]) (in-component? comp v)))]
-      [(? Address-Space?) #t]
-      [_ (error 'in-component? "Bad component ~a" comp)]))
+(define (in-variant? L var d)
+  (match-define (Variant _ comps) var)
+  (match d
+    [(variant (== var) ds)
+     ;; INVARIANT: variants with the same name have same length vectors.
+     (for/and ([comp (in-vector comps)]
+               [d (in-vector ds)])
+       (in-component? L comp d))]
+    [_ #f]))
 
-  (define (in-variant? var d)
-    (match-define (Variant name comps) var)
-    (match d
-      [(Variant (== name eq?) ds)
-       ;; INVARIANT: variants with the same name have same length vectors.
-       (define len (vector-length comps))
-       (let check-comps ([i 0])
-         (or (= i len)
-             (and (in-component? (unsafe-vector-ref comps i)
-                                 (unsafe-vector-ref ds i))
-                  (check-comps (add1 i)))))]
-      [_ #f]))
+(define (in-space? L space d)
+  (match-define (Language lang-name spaces) L)
+  (match space
+    [(User-Space variants-or-components _)
+     (for/or ([var (in-list variants-or-components)])
+       (cond [(Variant? var) (in-variant? var d)]
+             [(Space-reference? var) (in-space-ref? (Space-reference-name var) d)]
+             [else (in-component? var d)]))]
+    [(Address-Space space)
+     (match d
+       [(or (Address-Structural (== space eq?) _)
+            (Address-Egal (== space eq?) _)) #t]
+       [_ #f])]
+    ;; XXX: should external space predicates be allowed to return 'b.⊤?
+    [(External-Space pred _ _ _)
+     (match d
+       [(external (== space) _) #t]
+       [v (pred v)])]
+    [_ (error 'in-space? "Bad space ~a" space)]))
 
-  (in-space? space-name d))
+(define (in-component? L comp d)
+  (match comp
+    [(Space-reference name) (in-space-ref? L name d)]
+    [(Map domain range)
+     (define (check-map d)
+       (for/and ([(k v) (in-dict d)])
+         (and (in-component? L domain k)
+              (in-component? L range v))))
+     (match d
+       [(or (abstract-ffun m)
+            (discrete-ffun m)
+            (? dict? m)) (check-map m)]
+       [_ #f])]
+    [(℘ comp)
+     (and (set? d)
+          (for/and ([v (in-set d)]) (in-component? L comp v)))]
+    [(? Address-Space?) #t]
+    [_ (error 'in-component? "Bad component ~a" comp)]))
 
 ;; sexp-to-dpattern/check : S-exp Space-name Language → DPattern
 ;; A minor parser from sexp to internal representation.
@@ -148,32 +188,45 @@ Utility functions and specific functions that are shared between concrete and ab
       [(User-Space variants-or-components _)
        (match sexp
          [`(,(? symbol? head) . ,rest)
-          (let/ec break
-            (define var
+          (define var
+            (let/ec break
               (for/or ([v (in-list variants-or-components)])
                 (cond [(Variant? v)
                        (and (eq? head (Variant-name v))
                             v)]
                       [(Space-reference? v)
-                       (with-handlers ([exn? (λ (e) #f)])
+                       (with-handlers ([exn:fail? (λ (e) #f)])
                          (break (space-to-dpat (Space-reference-name v) sexp)))]
                       [else
-                       (with-handlers ([exn? (λ (e) #f)])
-                         (break (component-sexp-to-dpat v sexp)))])))
-            (unless var (error 'sexp-to-dpattern/check
-                               "Expected one of these variants ~a given ~a" variants-or-components sexp))
-            (define comps (Variant-Components var))
-            (define len (vector-length comps))
-            (unless (= len (length rest))
-              (error 'to-dpat "Variant components have arity mismatch. Given ~a expected ~a"
-                     rest (Variant-Components var)))
-            (define parsed-rest
-              (for/vector #:length len ([sexp (in-list rest)]
-                                        [comp (in-vector comps)])
-                (component-sexp-to-dpat comp sexp)))
-            (Variant head parsed-rest))]
+                       (with-handlers ([exn:fail? (λ (e) #f)])
+                         (break (component-sexp-to-dpat v sexp)))]))))
+          (unless var (error 'sexp-to-dpattern/check
+                             "Expected one of these variants ~a given ~a" variants-or-components sexp))
+          (define comps (Variant-Components var))
+          (define len (vector-length comps))
+          (unless (= len (length rest))
+            (error 'to-dpat "Variant components have arity mismatch. Given ~a expected ~a"
+                   rest (Variant-Components var)))
+          (define parsed-rest
+            (for/vector #:length len ([sexp (in-list rest)]
+                                      [comp (in-vector comps)])
+                        (component-sexp-to-dpat comp sexp)))
+          (variant var parsed-rest)]
          [_ (error 'to-dpat "Expected a variant constructor in head position ~a" sexp)])]))
   (space-to-dpat expected-space-name sexp))
+
+(define (dpattern->sexp d)
+  (match d
+    [(variant (Variant name _) ds)
+     (cons name (for/list ([d (in-vector ds)]) (dpattern->sexp d)))]
+    [(or (discrete-ffun d)
+         (abstract-ffun d)
+         (? dict? d))
+     (cons 'make-hash
+           (for/list ([(k v) (in-dict d)])
+             (list (dpattern->sexp k) (dpattern->sexp v))))]
+    [(external _ v) v]
+    [atom atom]))
 
 ;; Utility functions
 (define (set-add* s args)

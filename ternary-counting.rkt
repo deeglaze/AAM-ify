@@ -5,7 +5,7 @@
 (provide ;; Abstract counting algebra
          μ+ μmax μ⊔ c+ cmax c⊑
          ;; Ternary logic algebra
-         b∨ b∧ b¬ bδ
+         b∨ b∧ b¬ bδ ⦃b⦄
          for/bδ for*/bδ
          for/b∧ for*/b∧
          for/b∨ for*/b∨
@@ -35,16 +35,28 @@
 (define (μmax μ a c) (hash-set μ (cmax c (hash-ref μ a 0))))
 (define (μ⊔ μ₀ μ₁) (for/fold ([μ μ₀]) ([(a c) (in-hash μ₁)]) (μmax μ a c)))
 
-;; Not really ternary logic in the Kleene or Łukasiewicz notions. Just ∨ and ∧ in the flat lattice:
-;;    b.⊤
-;;   /   \
-;; #t    #f
+;; Ternary logic in the Kleene sense.
+(define ⦃t⦄ (set #t))
+(define ⦃f⦄ (set #f))
+(define ⦃b.⊤⦄ (set #t #f))
+(define/match (⦃b⦄ b)
+  [(#t) ⦃t⦄]
+  [(#f) ⦃f⦄]
+  [('b.⊤) ⦃b.⊤⦄])
 
-(define (b∨ b₀ b₁)
-  (if (or (eq? b₀ 'b.⊤) (eq? b₁ 'b.⊤)) 'b.⊤ (or b₀ b₁)))
+(define-syntax-rule (b∨ b₀ b₁)
+  (let ([no-dup (λ () b₁)])
+    (match b₀
+      [#t #t]
+      [#f (no-dup)]
+      ['b.⊤ (or (no-dup) 'b.⊤)])))
 
-(define (b∧ b₀ b₁)
-  (if (or (eq? b₀ 'b.⊤) (eq? b₁ 'b.⊤)) 'b.⊤ (and b₀ b₁)))
+(define-syntax-rule (b∧ b₀ b₁)
+  (let ([no-dup (λ () b₁)])
+   (match b₀
+     [#t (no-dup)]
+     [#f #f]
+     ['b.⊤ (and (no-dup) 'b.⊤)])))
 
 (define (b¬ b) (if (eq? b 'b.⊤) 'b.⊤ (not b)))
 
@@ -74,12 +86,12 @@
               #:break short-circuit
               bval)))]))))
 
- ;; short-circuit on #f and 'b.⊤
-(define-for/b-op for/b∧ for/fold #t b∧ bval (not (eq? bval #t)))
-(define-for/b-op for*/b∧ for*/fold #t b∧ bval (not (eq? bval #t)))
+ ;; short-circuit on #f
+(define-for/b-op for/b∧ for/fold #t b∧ bval (not bval))
+(define-for/b-op for*/b∧ for*/fold #t b∧ bval (not bval))
 ;; short-circuit on 'b.⊤
 (define-for/b-op for/bδ for/fold -unmapped bδ bval (eq? bval 'b.⊤))
 (define-for/b-op for*/bδ for*/fold -unmapped bδ bval (eq? bval 'b.⊤))
-;; short-circuit on #t and 'b.⊤ (non-#f, so just use value)
-(define-for/b-op for/b∨ for/fold -unmapped b∨ bval bval)
-(define-for/b-op for*/b∨ for*/fold -unmapped b∨ bval bval)
+;; short-circuit on #t
+(define-for/b-op for/b∨ for/fold #f b∨ bval (eq? bval #t))
+(define-for/b-op for*/b∨ for*/fold #f b∨ bval (eq? bval #t))
