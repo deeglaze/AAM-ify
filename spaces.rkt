@@ -1,6 +1,6 @@
 #lang racket/base
 
-(require racket/set)
+(require racket/set (for-syntax racket/base) racket/fixnum)
 (provide (all-defined-out))
 #|
 Allow spaces to be inductively defined or provided with the promise that they are finite
@@ -149,15 +149,8 @@ Allow stores (special)
 ;; - an (Address-Egal _)
 ;; - a Set[DPattern]
 
-;; A Top-level-form is one of
-;; - (Top-level-binding Pattern Expression)
-;; - (Store-extend Expression Expression Boolean Boolean)
-;; - (SAlloc Symbol)
-;; - (MAlloc Symbol)
-;; - (QSAlloc Symbol _)
-;; - (QMAlloc Symbol _)
-
 (struct Binding (lhs rexpr) #:transparent)
+(struct When (expr) #:transparent)
 ;; Make a syntactic distinction between allocations that expect to have 
 ;; structural equality (SAlloc) or Egal/Mutable equality (MAlloc)
 
@@ -166,7 +159,26 @@ Allow stores (special)
 ;; By treating store extensions as bindings, we can control the store flow.
 ;; We also don't need to make intermediate store names, which is a plus.
 
-(struct expression (pure?) #:transparent)
+;; OPT: classifying expressions with their store interaction allows us to have better
+;; allocation strategies when evaluating expressions.
+;; If an expression only needs to write to the store, we can output deltas;
+;; if only read, the output does not need to allocate for multiple returns;
+;; if only alloc, then we only need to change the abstract count, but not the store;
+;; and any combinations thereof. It can be advantageous to memoize expressions that do not read the store.
+;; A Store-Interation is a combination of
+;; - read        (10000b)
+;; - write       (01000b)
+;; - cardinality (00100b)
+;; - alloc       (00010b)
+;; - many        (00001b)
+;; All encoded as a 5 bit number (fixnum)
+(define (reads? n) (fxand n 16))
+(define (writes? n) (fxand n 8))
+(define (cards? n) (fxand n 4))
+(define (allocs? n) (fxand n 2))
+(define (many? n) (fxand n 1))
+
+(struct expression (store-interaction) #:transparent)
 ;; An Expression is one of
 ;; - (Term Pattern)
 ;; - Boolean
@@ -184,53 +196,56 @@ Allow stores (special)
 ;; and the possibly impure
 ;; - (Meta-function-call name Pattern)
 ;; - (Store-extend Expression Expression Boolean)
-;; - (SAlloc)
-;; - (MAlloc)
-;; - (QSAlloc _)
-;; - (QMAlloc _)
+;; - (SAlloc Symbol)
+;; - (MAlloc Symbol)
+;; - (QSAlloc Symbol _)
+;; - (QMAlloc Symbol _)
 
-(struct (Store-extend expression) (key-expr val-expr trust-strong?) #:transparent)
+(struct Store-extend (key-expr val-expr trust-strong?) #:transparent)
 
 ;; Notes: The boolean in Map-extend is whether the map should remain a strong update through abstraction.
 ;; This only matters for maps that have addresses in their domains.
 
-(struct (Term expression) (pat) #:transparent)
+(struct Term expression (pat) #:transparent)
 
-(struct (Map-lookup expression) (mvar key-expr default? def-expr) #:transparent)
-(struct (Map-extend expression) (mvar key-expr val-expr trust-strong?) #:transparent)
-(struct (Store-lookup expression) (key-expr) #:transparent)
+(struct Map-lookup expression (mvar key-expr default? def-expr) #:transparent)
+(struct Map-extend expression (mvar key-expr val-expr trust-strong?) #:transparent)
+(struct Store-lookup expression (key-expr) #:transparent)
 
-(struct (Meta-function-call expression) (name arg-pat) #:transparent)
+(struct Meta-function-call expression (name arg-pat) #:transparent)
 
-(struct (If expression) (g t e) #:transparent)
-(struct (Equal expression) (l r) #:transparent)
-(struct (Let expression) (bindings body-expr) #:transparent)
-(struct (In-Dom expression) (mvar key-expr) #:transparent)
+(struct If expression (g t e) #:transparent)
+(struct Equal expression (l r) #:transparent)
+(struct Let expression (bindings body-expr) #:transparent)
+(struct In-Dom expression (mvar key-expr) #:transparent)
 
-(struct (Set-Union expression) (exprs) #:transparent)
-(struct (Empty-set expression) () #:transparent)
-(struct (Set-Add* expression) (set-expr exprs) #:transparent)
-(struct (In-Set expression) (set-expr expr) #:transparent)
+(struct Set-Union expression (exprs) #:transparent)
+(struct Empty-set expression () #:transparent)
+(struct Set-Add* expression (set-expr exprs) #:transparent)
+(struct In-Set expression (set-expr expr) #:transparent)
 
-(struct (Unsafe-store-space-ref expression) () #:transparent)
-(struct (Unsafe-store-ref expression) (space) #:transparent)
+(struct Unsafe-store-space-ref expression () #:transparent)
+(struct Unsafe-store-ref expression (space) #:transparent)
 
 ;; If expecting a set, make an arbitrary choice.
-(struct (Choose expression) (expr) #:transparent)
+(struct Choose expression (expr) #:transparent)
 
-(struct (SAlloc expression) () #:transparent)
-(struct (MAlloc expression) () #:transparent)
+(struct SAlloc expression (space) #:transparent)
+(struct MAlloc expression (space) #:transparent)
 ;; Qualified forms.
-(struct (QSAlloc expression) (hint) #:transparent)
-(struct (QMAlloc expression) (hint) #:transparent)
+(struct QSAlloc expression (space hint) #:transparent)
+(struct QMAlloc expression (space hint) #:transparent)
 
 ;; When evaluating top-level-forms, we can allocate addresses and change the store.
-;; When expressions have these side-effects, we wrap the contents in the following,
-;; which turn out to be isomorphic to the state representations.
-(define Result/effect State)
+;; When expressions have these side-effects, we wrap the contents in the following.
 (define-syntax Result/effect (make-rename-transformer #'State))
-(define Abs-Result/effect Abs-State)
-(define-syntax Abs-Result/effect (make-rename-transformer #'Abs-State))
+
+;; We attach a quality of a result to qualify if it follows from cumulatively
+;; strong or weak side-conditions in Let or top-level forms.
+;; Implicit side-effects include weak store/map lookups
+;; Non-determinism resulting from abstraction is different since evaluation is
+;; considered "successful," even if approximate.
+(struct Abs-Result/effect (quality term store-spaces μ) #:transparent)
 
 ;; the definition of a meta-function is like a reduction semantics,
 ;; but treated like a functional relation.
@@ -260,7 +275,3 @@ Allow stores (special)
 (struct Space-component (name) #:transparent)
 
 ;; An Allocation-Address is a List[(∪ Variant-field Component-Address)]
-
-;; An Endpoint is an (Endpoint Variant-Address Space-Name)
-(struct Endpoint (address space) #:transparent)
-(struct Space-node (name trust) #:transparent)

@@ -1,7 +1,7 @@
 #lang racket/base
 
 (require (for-syntax syntax/for-body racket/base)
-         racket/match (only-in "spaces.rkt" -unmapped))
+         racket/match racket/set (only-in "spaces.rkt" -unmapped))
 (provide ;; Abstract counting algebra
          μ+ μmax μ⊔ c+ cmax c⊑
          ;; Ternary logic algebra

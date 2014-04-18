@@ -17,11 +17,11 @@ The key ideas:
 PLANNED FEATURES:
 - abstract counting for better equality matching
 
-WISHLIST:
+WISHLIST (! is done):
 + build an escape hatch for smarter lattices.
-+ make "address spaces" that divvy items amongst as many stores that get automatically added.
+! make "address spaces" that divvy items amongst as many stores that get automatically added.
   currently there is one address space --- the required store component in each rewrite rule.
-+ Extend address spaces to be mutable or immutable.
+! Extend address spaces to be mutable or immutable.
 + widening for control flow
 + automatic garbage collection in (to add) "weak maps" across address spaces.
   Addresses of different spaces can occur in mapped objects.
@@ -51,6 +51,12 @@ FIXMEs:
     (add-space-edges! LG Space-nodes name space))
   LG)
 
+;; An Endpoint is an (Endpoint Variant-Address Space-Name)
+(struct Endpoint (address space) #:transparent)
+(struct Space-node (name trust) #:transparent)
+;; distinguish space from reference to identify recursive spaces
+(struct Space-ref-node (sn) #:transparent)
+
 ;; Spaces are represented as Pair[Space-name,Trusted?] to do error-checking.
 ;; If two spaces with different trusted? booleans appear in the same scc, error.
 (define (add-space-nodes! G spaces)
@@ -62,7 +68,11 @@ FIXMEs:
                  space]
                 [(User-Space variants trust-recursion?)
                  (define node (Space-node name trust-recursion?))
-                 (unless (has-vertex? G node) (add-vertex! G node))
+                 (define self-node (Space-ref-node node))
+                 (unless (has-vertex? G node)
+                   (add-vertex! G node)
+                   (add-vertex! G self-node)
+                   (add-directed-edge! G self-node node))
                  node]))))
 
 (define (add-space-edges! G Space-nodes name space)
@@ -75,9 +85,11 @@ FIXMEs:
        (define space-node
          (if (Address-Space? space)
              space
-             (hash-ref Space-nodes space
-                       (λ () (error 'add-space-edges!
-                                    "Space ~a refers to unknown space ~a" name space)))))
+             (match (hash-ref Space-nodes space
+                        (λ () (error 'add-space-edges!
+                                     "Space ~a refers to unknown space ~a" name space)))
+               [(? Space-node? sn) (Space-ref-node sn)]
+               [other other])))
        (add-directed-edge! G node addr)
        (add-directed-edge! G addr space-node))]
     [_ (void)]))
@@ -92,9 +104,14 @@ FIXMEs:
   ;; Do a little error checking while discovering recursion.
   (define recursive-islands (scc LG))
   ;; Make a map of Space-name to Set[spaces recursive with Space]
-  (for/fold ([h ρ₀]) ([cc (in-list recursive-islands)])
-      (define spaces (list->set (filter Space-node? cc)))
-      (define space-names (for/set ([space (in-set spaces)]) (Space-node-name space)))
+  (for/fold ([h ρ₀]) ([cc (in-list recursive-islands)]
+                      #:unless (match cc
+                                 ;; The reference nodes themselves are administrative.
+                                 [(list (? Space-ref-node?)) #t] [_ #f]))
+      (define spaces
+        (for/set ([c (in-list cc)] #:when (Space-ref-node? c)) (Space-ref-node-sn c)))
+      (define space-names
+        (for/set ([space (in-set spaces)]) (Space-node-name space)))
       (define-values (h* dummy)
        (for/fold ([h h] [trust 'unspecified]) ([space (in-set spaces)])
          (define ctrust (Space-node-trust space))
@@ -120,6 +137,7 @@ FIXMEs:
   (define-values (variant-rec-addrs abstract-spaces₁)
     (for/fold ([rec-addrs ρ₀] [abstract-spaces abstract-spaces₀])
         ([(name space) (in-dict spaces)])
+      (printf "Processing ~a: ~a~%" name space)
       (match space
         [(or (? External-Space?) (? Address-Space?)) (values rec-addrs abstract-spaces)]
         [(User-Space variants-or-components trusted?)
@@ -133,6 +151,7 @@ FIXMEs:
               (hash-set rec-addrs (Variant-name v/c) ∅))
             abstract-spaces)]
           [else
+           ;; update rec-addrs and abs-spaces for each variant/component in the space.
            (for/fold ([rec-addrs rec-addrs]
                       [abs-spaces abstract-spaces])
                ([variant-or-component (in-list variants-or-components)])
@@ -255,7 +274,7 @@ FIXMEs:
            abstract-spaces))
 
 ;; find-recursive-mentions :
-;;  Space-name (∪ Variant Component) Map[Variant-name,Variant-Address] Rec-Space-Map →
+;;  Map[Space-name,Set[Space-name]] Space-name (∪ Variant Component) Map[Variant-name,Variant-Address] Rec-Space-Map →
 ;;    (values Map[Variant-name,Variant-Address] Rec-Space-Map)
 ;; Where Rec-Space-Map = Map[Space-name,(∪ Set[Space-name] Boolean)]
 ;; Purpose:
@@ -271,24 +290,30 @@ FIXMEs:
     (match (hash-ref h k -unmapped)
       [(? boolean?) h]
       [_ (hash-set h k v)]))
+  ;; Get the set of recursive mentions and fill out abstract-space dependencies.
   (define (find-recursive-mentions-in-component comp rev-addr abs-spaces)
     (match comp
       [(Space-reference name)
        (cond
         [(set-member? (hash-ref recursive-spaces current-space ∅) name)
-            (values (set (reverse rev-addr))
-                    (hash-set-if-unresolved abs-spaces current-space #t))]
+         (values (set (reverse rev-addr))
+                 (hash-set-if-unresolved abs-spaces current-space #t))]
         [else
          (values ∅
           (match (hash-ref abs-spaces name ∅)
-            [#t (hash-set-if-unresolved abs-spaces current-space #t)] ;; known recursive (already set if trusted)
+            [#t ;; known recursive (already set if trusted)
+             (hash-set-if-unresolved abs-spaces current-space #t)]
             [#f abs-spaces] ;; known non-recursive
             ;; unknown. Add to set of names to resolve after finishing.
             [dependents
-             (when (boolean? (hash-ref abs-spaces current-space -unmapped))
-               (error 'find-recursive-mentions-in-component
-                      "Impossible state? Expect co-trust to be checked before getting here."))
-             (hash-join abs-spaces current-space (set-add dependents name))]))])]
+             (cond
+              [(boolean? (hash-ref abs-spaces current-space -unmapped))
+               ;; Already showed current-space is abstract for a different reason.
+               ;; We don't know more about name here.
+               abs-spaces]
+              [else
+               ;; If name is abstract, then so is current-space.
+               (hash-join abs-spaces current-space (set-add dependents name))])]))])]
       [(℘ comp)
        (find-recursive-mentions-in-component comp (cons '℘ rev-addr) abs-spaces)]
       [(Map domain range)
@@ -322,17 +347,18 @@ FIXMEs:
   (define catch-self (mutable-set))
   (define-values (abs-spaces* dummy)
     (let loop ([abs-spaces abs-spaces] [space-name* space-name])
-      (when (set-member? catch-self space-name)
-        (error 'space-abstract? "Uncaught recursion on ~a given ~a" space-name abs-spaces))
+      (when (set-member? catch-self space-name*)
+        (error 'search-space-abstract "Uncaught recursion on ~a given ~a" space-name abs-spaces))
       (set-add! catch-self space-name*)
-      (match (hash-ref abs-spaces space-name)
+      (match (hash-ref abs-spaces space-name*)
         [(? boolean? b) (values abs-spaces b)]
-        [deps (hash-set abs-spaces
-                        space-name*
-                        (for/fold ([h abs-spaces] [b #f])
-                            ([dep (in-set deps)])
-                          (define-values (h* b*) (loop h dep))
-                          (values h* (or b* b))))])))
+        [deps
+         (define-values (abs-spaces* b)
+           (for/fold ([h abs-spaces] [b #f])
+               ([dep (in-set deps)])
+             (define-values (h* b*) (loop h dep))
+             (values h* (or b* b))))
+         (values (hash-set abs-spaces* space-name* b) b)])))
   abs-spaces*)
 
 (define (component->endpoints comp)
@@ -373,10 +399,10 @@ FIXMEs:
   (if (variant? pat)
       (let-values ([(pat* binding-scs) (flatten-pattern rec-addrs pat '() #f)])
         (values (Bvar new-bvar (Address-Space 'AAM))
-                (cons (Binding pat* (Choose (Store-lookup (Term (Rvar new-bvar)))))
+                (cons (Binding pat* (Choose (Store-lookup #t (Term (Rvar new-bvar)))))
                       binding-scs)))
       (values (Bvar new-bvar (Address-Space 'AAM))
-              (list (Binding pat (Choose (Store-lookup (Term (Rvar new-bvar)))))))))
+              (list (Binding pat (Choose (Store-lookup #t (Term (Rvar new-bvar)))))))))
 
 ;; flatten-pattern : Pattern Option[Set[List[Component-Address]]] → (values Pattern List[Binding-side-conditions])
 (define (flatten-pattern rec-addrs pat rev-addr [rec-positions #f])
@@ -427,8 +453,10 @@ FIXMEs:
       (define store** (gensym 'σ))
       (values (Rvar address-var)
               (append store-updates
-                      (list (Binding (Avar address-var) (QSAlloc (cons alloc-tag (reverse rev-addr))))
-                            (Store-extend (Term (Rvar address-var)) (Term pat*)))))]
+                      (list (Binding (Avar address-var)
+                                     (QSAlloc #f (cons alloc-tag (reverse rev-addr))))
+                            (Store-extend (Term #t (Rvar address-var))
+                                          (Term #t pat*)))))]
      [else
       (match tm
         [(Bvar x _) (error 'abstract-rule "Rule RHS may not bind ~a" tm)]
@@ -530,17 +558,17 @@ FIXMEs:
 
   (define (recur expr rev-addr)
     (match expr
-      [(Term pattern)
+      [(Term si pattern)
        ;; We use the path taken to this expr as the tag for allocation.
        (define-values (pat* store-updates)
          (check-and-rewrite-term rec-addrs (reverse rev-addr) pattern))
        ;; If no store updates, then no new store.
        (cond
         [(empty? store-updates) (values pat* #f)]
-        [else (values (Let store-updates pat*) #t)])]
+        [else (values (Let #f store-updates pat*) #t)])]
 
       ;; TODO: mark maps as abstract or not for correct abstraction.
-      [(Map-lookup m kexpr default? dexpr)
+      [(Map-lookup si m kexpr default? dexpr)
        (bind kexpr
              (cons 'ML-key rev-addr)
              (λ (k*)
@@ -549,42 +577,42 @@ FIXMEs:
                    (bind dexpr
                          (cons 'ML-default rev-addr)
                          (λ (d*)
-                            (values (Map-lookup m k* #t d*) #f))
+                            (values (Map-lookup si m k* #t d*) #f))
                          'default)]
                  [else (values (Map-lookup m k* #f #f) #f)]))
              'key)]
 
-      [(Map-extend m kexpr vexpr trust-strong?)
+      [(Map-extend si m kexpr vexpr trust-strong?)
        (bind kexpr
              (cons 'ME-key rev-addr)
              (λ (k*)
                 (bind vexpr
                       (cons 'ME-val rev-addr)
                       (λ (v*)
-                         (values (Map-extend m k* v* trust-strong?) #f))))
+                         (values (Map-extend si m k* v* trust-strong?) #f))))
              'key)]
 
-      [(Meta-function-call name arg-pat)
+      [(Meta-function-call si name arg-pat)
        (bind (Term arg-pat)
              (cons 'MF-arg rev-addr)
              (λ (arg*)
-                (values (Meta-function-call name arg*)
+                (values (Meta-function-call si name arg*)
                         ;; Consider store changes if Meta-function can change store.
                         ;; Conservatively assume they can change.
                         (hash-ref ΞΔ name #t))))]
 
-      [(If g t e)
+      [(If si g t e)
        (bind g
              (cons 'If-guard rev-addr)
              (λ (g*)
                 (define-values (t* tΔ?) (recur t (cons 'If-then rev-addr)))
                 (define-values (e* eΔ?) (recur e (cons 'If-else rev-addr)))
-                (values (If g* t* e*) (or tΔ? eΔ?))))]
+                (values (If si g* t* e*) (or tΔ? eΔ?))))]
 
       ;; Let is tricky since it might have rebindings of the store, which need to be forwarded as the
       ;; next store when translation goes forward.
 
-      [(Let bindings body)
+      [(Let si bindings body)
        ;; In order to not get generated lets in let clauses,
        ;; we bind Binding RHSs to variables that then get matched against their pattern.
        (let let-recur ([bindings bindings] [i 0] [bindings* '()])
@@ -595,7 +623,7 @@ FIXMEs:
                  [else
                   (bind body
                         (cons 'Let-body rev-addr)
-                        (λ (b*) (values (Let (reverse bindings*) b*) #f)))])]
+                        (λ (b*) (values (Let si (reverse bindings*) b*) #f)))])]
            [(cons (Binding pat expr) bindings)
             (bind expr
                   (cons `(Let-binding ,i) rev-addr)
@@ -615,35 +643,39 @@ FIXMEs:
                            (λ (v*)
                               (let-recur bindings
                                          (add1 i)
-                                         (cons (Store-extend k* v* trust-strong?) bindings*))))))]))]
+                                         (cons (Store-extend k* v* trust-strong?) bindings*))))))]
+           [(cons (When expr) bindings)
+            (bind expr
+                  (cons `(When-expr ,i) rev-addr)
+                  (λ (w*) (let-recur bindings (add1 i) (cons (When w*) bindings*))))]))]
 
-      [(Equal lexpr rexpr)
+      [(Equal si lexpr rexpr)
        (bind lexpr
              (cons 'Equal-left rev-addr)
              (λ (l*)
                 (bind rexpr
                       (cons 'Equal-right rev-addr)
                       (λ (r*)
-                         (values (Equal l* r*) #f)))))]
+                         (values (Equal si l* r*) #f)))))]
 
-      [(In-Dom mvar kexpr)
+      [(In-Dom si mvar kexpr)
        (bind kexpr
              (cons 'In-Dom-key rev-addr)
-             (λ (k*) (values (In-Dom mvar k*) #f)))]
+             (λ (k*) (values (In-Dom si mvar k*) #f)))]
 
-      [(Set-Union sexprs)
+      [(Set-Union si sexprs)
        (if (empty? sexprs)
            (values (Empty-set) #f)
            (let union-recur ([sexprs sexprs] [i 0] [sexprs* '()])
              (match sexprs
-               ['() (values (Set-Union (reverse sexprs*)) #f)]
+               ['() (values (Set-Union si (reverse sexprs*)) #f)]
                [(cons s sexprs)
                 (bind s
                       (cons `(Set-Union ,i) rev-addr)
                       (λ (s*)
                          (union-recur sexprs (add1 i) (cons s* sexprs*))))])))]
 
-      [(Set-Add* sexpr vexprs)
+      [(Set-Add* si sexpr vexprs)
        (if (empty? vexprs)
            (recur sexpr rev-addr)
            (bind sexpr
@@ -651,21 +683,21 @@ FIXMEs:
                  (λ (s*)
                     (let add*-recur ([vexprs vexprs] [i 0] [vexprs* '()])
                       (match vexprs
-                        ['() (values (Set-Add* s* (reverse vexprs*)) #f)]
+                        ['() (values (Set-Add* si s* (reverse vexprs*)) #f)]
                         [(cons v vexprs)
                          (bind v
                                (cons `(Set-Add*-val ,i) rev-addr)
                                (λ (v*)
                                   (add*-recur vexprs (add1 i) (cons v* vexprs*))))])))))]
       
-      [(In-Set sexpr vexpr)
+      [(In-Set si sexpr vexpr)
        (bind sexpr
              (cons 'In-Set-set rev-addr)
              (λ (s*)
                 (bind vexpr 
                       (cons 'In-Set-value rev-addr)
                       (λ (v*)
-                         (values (In-Set s* v*) #f)))))]
+                         (values (In-Set si s* v*) #f)))))]
 
       [(or (? boolean?) (? Empty-set?) (? Unsafe-store-ref?)) (values expr #f)]
       [_ (error 'abstract-expression "Bad expression ~a" expr)]))

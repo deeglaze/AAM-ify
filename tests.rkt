@@ -1,6 +1,7 @@
 #lang racket/base
 (require "spaces.rkt" "shared.rkt" "transform.rkt" "concrete.rkt"
          (for-syntax syntax/parse racket/base)
+         racket/unit
          racket/pretty racket/set racket/match)
 
 (define-syntax log-thread
@@ -15,7 +16,7 @@
          (thread (λ () 
                     #,((attribute port)
                        #'p
-                       #'(let loop () (define vs (sync lr)) (write vs p) (newline p) (loop))))))]))
+                       #'(let loop () (define vs (sync lr)) (write vs p) (newline p) (newline p) (loop))))))]))
 
 (define (rule-lookup rules name)
   (for/or ([rule (in-list rules)] #:when (equal? name (Rule-name rule))) rule))
@@ -35,6 +36,7 @@
 (define vkcons (Variant 'Kcons (vector (Space-reference 'Frame)
                                        (Space-reference 'Kont))))
 (define vstate (Variant 'State (vector (Space-reference 'With-env) (Space-reference 'Kont))))
+(define vspace (User-Space (list vclov) #f))
 (define CESK-lang
   (Language
    'LC/CESK
@@ -44,10 +46,30 @@
     'Expr (User-Space (list vref vapp (Space-reference 'Pre-value)) #t)
     'With-env (User-Space (list vclo) #f)
     'Pre-value (User-Space (list vlam) #t)
-    'Value (User-Space (list vclov) #f)
+    'Value vspace
     'Frame (User-Space (list vkar vkfn) #f)
     'Kont (User-Space (list vmt vkcons) #f)
     'States (User-Space (list vstate) #f))))
+
+(define-unit CESK-conc-parms@
+  (import)
+  (export language-parms^)
+  (define alloc gensym)
+  (define Ξ #hash()) ;; No meta-functions in simple CESK.
+  (define L CESK-lang))
+
+(define-values/invoke-unit/infer
+  (export language-impl^)
+  #;
+  (export (rename language-impl^
+                  [c/expression-eval expression-eval]
+                  [c/rule-eval rule-eval]
+                  [c/mf-eval mf-eval]))
+  (link CESK-conc-parms@ concrete-semantics@))
+(define (c/apply-reduction-relation rules)
+  (apply-reduction-relation rule-eval rules))
+(define (c/apply-reduction-relation* rules)
+  (apply-reduction-relation* rule-eval rules))
 
 (define CESK-reduction
   (list
@@ -58,7 +80,7 @@
                                          (Avar 'ρ)))
                    (Avar 'κ)))
          (variant vstate (vector (Rvar 'v) (Rvar 'κ)))
-         (list (Binding (Avar 'v) (Store-lookup (Map-lookup 'ρ (Term (Rvar 'x)) #f #f)))))
+         (list (Binding (Avar 'v) (Store-lookup #t (Map-lookup #t 'ρ (Term #t (Rvar 'x)) #f #f)))))
    (Rule 'application
          (variant vstate
                   (vector
@@ -73,7 +95,7 @@
          '())
    (Rule 'argument-eval
          (variant vstate
-                  (vector (Bvar 'v 'Value)
+                  (vector (Bvar 'v vspace)
                           (variant vkcons (vector (variant vkar (vector (Avar 'e) (Avar 'ρ)))
                                                   (Avar 'κ)))))
          (variant vstate
@@ -83,7 +105,7 @@
          '())
    (Rule 'function-eval
          (variant vstate
-                  (vector (Bvar 'v 'Value)
+                  (vector (Bvar 'v vspace)
                           (variant vkcons
                                  (vector (variant vkfn
                                                 (vector (variant vclov
@@ -93,9 +115,9 @@
          (variant vstate
                   (vector (variant vclo (vector (Rvar 'e) (Rvar 'ρ*)))
                           (Rvar 'κ)))
-         (list (MAlloc 'a)
-               (Binding (Avar 'ρ*) (Map-extend 'ρ (Term (Rvar 'x)) (Term (Rvar 'a)) #f))
-               (Store-extend (Term (Rvar 'a)) (Term (Rvar 'v)) #f)))))
+         (list (Binding (Avar 'a) (MAlloc #f 'bindings))
+               (Binding (Avar 'ρ*) (Map-extend #t 'ρ (Term #t (Rvar 'x)) (Term #t (Rvar 'a)) #f))
+               (Store-extend (Term #t (Rvar 'a)) (Term #t (Rvar 'v)) #f)))))
 
 (let-values ([(abs-lang rec-addrs abstract-spaces) (abstract-language CESK-lang)])
   (pretty-print abs-lang)
@@ -112,7 +134,7 @@
   (mk-State (variant vstate (vector (variant vclo (vector term #hash()))
                                     (variant vmt #())))))
 (define (run L expr)
-  ((c/apply-reduction-relation* CESK-lang CESK-reduction #hash()) (inject L expr)))
+  ((c/apply-reduction-relation* CESK-reduction) (inject L expr)))
 (parameterize ([current-logger (make-logger 'match-info)])
  (log-thread 'info)
  (for/list ([out (in-set (run CESK-lang '(App (Lam x (Ref x))
