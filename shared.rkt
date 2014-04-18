@@ -28,7 +28,7 @@ Utility functions and specific functions that are shared between concrete and ab
 
 (define-signature language-parms^
   (L ;; Language
-   alloc ;; State [Any] → Any
+   alloc ;; State Map[Symbol,DPattern] [Any] → Any
    Ξ ;; Map[Symbol,Meta-function]
    ))
 ;; A Store-Space is a Map[Address-Space-Name,Map[Any,DPattern]]
@@ -54,9 +54,7 @@ Utility functions and specific functions that are shared between concrete and ab
     [atom atom]))
 
 (define ((apply-reduction-relation rule-eval rules) term)
-  (for/union ([rule (in-list rules)])
-    (printf "Trying rule ~a~%" (Rule-name rule))
-    (rule-eval rule term)))
+  (for/union ([rule (in-list rules)]) (rule-eval rule term)))
 
 (define (extend-indefinitely F x)
   (match (F x)
@@ -139,7 +137,6 @@ Utility functions and specific functions that are shared between concrete and ab
           (for/and ([v (in-set d)]) (in-component? L comp v)))]
     [(? Address-Space?) #t]
     [_ (error 'in-component? "Bad component ~a" comp)]))
-(trace in-variant? in-component? in-space?)
 
 ;; sexp-to-dpattern/check : S-exp Space-name Language → DPattern
 ;; A minor parser from sexp to internal representation.
@@ -160,7 +157,8 @@ Utility functions and specific functions that are shared between concrete and ab
        (for/hash ([(k v) (in-dict sexp)])
          (values (component-sexp-to-dpat domain k)
                  (component-sexp-to-dpat range v)))]
-      [(Space-reference name) (space-to-dpat name sexp)]))
+      [(Space-reference name) (space-to-dpat name sexp)]
+      [_ (error 'component-sexp-to-dpat "Bad component ~a" comp)]))
 
   (define (space-to-dpat space-name sexp)
     (define space
@@ -181,7 +179,6 @@ Utility functions and specific functions that are shared between concrete and ab
                            v)]
                      [(Space-reference? v)
                       (with-handlers ([exn:fail? (λ (e) #f)])
-                        (printf "Trying reference ~a~%" v)
                         (break (space-to-dpat (Space-reference-name v) sexp)))]
                      [else
                       (with-handlers ([exn:fail? (λ (e) #f)])
@@ -199,8 +196,8 @@ Utility functions and specific functions that are shared between concrete and ab
                                        [comp (in-vector comps)])
                          (component-sexp-to-dpat comp sexp)))
            (variant var parsed-rest))]
-         [_ (error 'to-dpat "Expected a variant constructor in head position ~a" sexp)])]))
-  (trace space-to-dpat)
+         [_ (error 'to-dpat "Expected a variant constructor in head position ~a" sexp)])]
+      [_ (error 'space-to-dpat "Bad space ~a" space)]))
   (space-to-dpat expected-space-name sexp))
 
 (define (dpattern->sexp d)
@@ -242,16 +239,18 @@ Utility functions and specific functions that are shared between concrete and ab
          (Address-Egal space addr))
      (hash-ref (hash-ref store-spaces space #hash())
                addr
-               (λ () (error 'store-ref "Unmapped address ~a" k)))]))
+               (λ () (error 'store-ref "Unmapped address ~a" k)))]
+    [_ (error 'store-ref "Bad address ~a" k)]))
 
-(define (store-op op)
+(define (store-op who op)
   (λ (store-spaces k v)
      (match k
        [(or (Address-Structural space addr)
             (Address-Egal space addr))
         (hash-set store-spaces
                   space
-                  (op (hash-ref store-spaces space #hash()) addr v))])))
+                  (op (hash-ref store-spaces space #hash()) addr v))]
+       [_ (error who "Bad address ~a" k)])))
 
-(define store-set (store-op hash-set))
-(define store-add (store-op hash-add))
+(define store-set (store-op 'store-set hash-set))
+(define store-add (store-op 'store-add hash-add))

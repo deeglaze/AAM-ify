@@ -442,11 +442,8 @@ FIXMEs:
   (define (recur current-variant rev-addr rev-local-addr tm)
     (define rec-addresses
       (if current-variant (hash-ref rec-addrs current-variant ∅) ∅))
-    (printf "Checking ~a ∈ ~a~%"
-            (reverse rev-local-addr) rec-addresses)
     (cond
      [(set-member? rec-addresses (reverse rev-local-addr))
-      (printf "Success~%")
       (define address-var (gensym))
       (define-values (pat* store-updates)
         (recur #f rev-addr '() tm))
@@ -455,9 +452,9 @@ FIXMEs:
               (append store-updates
                       (list (Binding (Avar address-var)
                                      (QSAlloc #f 'AAM (cons alloc-tag (reverse rev-addr))))
-                            (Store-extend #t
-                                          (Term #t (Rvar address-var))
-                                          (Term #t pat*)))))]
+                            (Store-extend (Term #t (Rvar address-var))
+                                          (Term #t pat*)
+                                          #f))))]
      [else
       (match tm
         [(Bvar x _) (error 'abstract-rule "Rule RHS may not bind ~a" tm)]
@@ -465,6 +462,7 @@ FIXMEs:
          (define len (vector-length pats))
          (define pats* (make-vector len))
          ;; TODO?: error/warn if space defining vname is trusted.
+         ;;        Or have second tag trusting construction
          (define store-updates
            (let rewrite-pats ([i 0]
                               [rev-store-updates '()])
@@ -482,9 +480,7 @@ FIXMEs:
                              (append (reverse store-updates*) rev-store-updates))])))
          (values (variant v pats*) store-updates)]
         [other (values other '())])]))
-  (trace recur)
   (recur #f '() '() tm))
-(trace check-and-rewrite-term)
 
 (define (abstract-meta-function L rec-addrs ΞΔ mf)
   (match-define (Meta-function name rules trusted-implementation/conc trusted-implementation/abs) mf)
@@ -507,7 +503,7 @@ FIXMEs:
   ;; Finally we rewrite the binding side-conditions to go between the
   ;; lhs and rhs bindings/side-conditions
   (define binding-side-conditions*
-    (abstract-bindings rec-addrs ΞΔ '() binding-side-conditions reverse))
+    (abstract-bindings rec-addrs ΞΔ (list rule-name) binding-side-conditions reverse))
 
   ;; We now need to flatten the lhs pattern, and all patterns in binding-side-conditions.
   ;; The RHS pattern needs its recursive positions replaced with allocated addresses and
@@ -557,7 +553,7 @@ FIXMEs:
   (cond
    [Δ?
     (define var (if name (gensym name) (gensym 'intermediate)))
-    (define-values (r dummy) (fn (Rvar var)))
+    (define-values (r dummy) (fn (Term #t (Rvar var))))
     (values (Let (list (Binding (Avar var) e*)) r) #t)]
    [else (fn e*)]))
 
@@ -580,8 +576,8 @@ FIXMEs:
         (check-and-rewrite-term rec-addrs (reverse rev-addr) pattern))
       ;; If no store updates, then no new store.
       (cond
-       [(empty? store-updates) (values pat* #f)]
-       [else (values (Let #f store-updates pat*) #t)])]
+       [(empty? store-updates) (values (Term #t pat*) #f)]
+       [else (values (Let #f store-updates (Term #t pat*)) #t)])]
 
      [(Store-lookup si kexpr)
       (bind kexpr
@@ -722,8 +718,8 @@ FIXMEs:
 ;; Instead, ???
 ;; alloc-skeleton : List[Rule] Map[MF-Name,Meta-function] → (values Alloc-Fn Syntax)
 (define (alloc-skeleton abs-rules abs-Ξ)
-  (values (λ (ς [hint #f]) hint)
-          #`(λ (ς hint)
+  (values (λ (ς ρ [hint #f]) hint)
+          #`(λ (ς ρ hint)
                (match-define (Abs-State term σ μ) ς)
                (match hint
                  #,@(alloc-hints abs-rules)
@@ -736,7 +732,15 @@ FIXMEs:
 (define (alloc-hints rules)
   (for/list ([hint (in-list (rules-hints rules))])
     ;; quoted hint is the local variable introduced by alloc-skeleton.
-    #`[(quote #,hint) hint]))
+    #`[(quasiquote #,(addr->syntax hint)) hint]))
+
+(define (addr->syntax lst)
+  (match lst
+    ['() '()]
+    [(cons (or (? symbol? s) (? pair? s)) lst)
+     (cons s (addr->syntax lst))]
+    [(cons (Variant-field name idx) lst)
+     (cons #`(unquote (Variant-field (quote #,name) #,idx)) (addr->syntax lst))]))
 
 (define (rules-hints rules)
   (hint-map (λ (rule tail)

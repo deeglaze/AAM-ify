@@ -31,8 +31,8 @@
   [(1 'ω) #t]
   [(_ _) #f])
 
-(define (μ+ μ a c) (hash-set μ (c+ c (hash-ref μ a 0))))
-(define (μmax μ a c) (hash-set μ (cmax c (hash-ref μ a 0))))
+(define (μ+ μ a c) (hash-set μ a (c+ c (hash-ref μ a 0))))
+(define (μmax μ a c) (hash-set μ a (cmax c (hash-ref μ a 0))))
 (define (μ⊔ μ₀ μ₁) (for/fold ([μ μ₀]) ([(a c) (in-hash μ₁)]) (μmax μ a c)))
 
 ;; Ternary logic in the Kleene sense.
@@ -42,21 +42,24 @@
 (define/match (⦃b⦄ b)
   [(#t) ⦃t⦄]
   [(#f) ⦃f⦄]
-  [('b.⊤) ⦃b.⊤⦄])
+  [('b.⊤) ⦃b.⊤⦄]
+  [(_) (error '⦃b⦄ "Bad boolean♯ ~a" b)])
 
 (define-syntax-rule (b∨ b₀ b₁)
   (let ([no-dup (λ () b₁)])
     (match b₀
       [#t #t]
       [#f (no-dup)]
-      ['b.⊤ (or (no-dup) 'b.⊤)])))
+      ['b.⊤ (or (no-dup) 'b.⊤)]
+      [_ (error 'b∨ "Bad boolean♯ ~a" b₀)])))
 
 (define-syntax-rule (b∧ b₀ b₁)
   (let ([no-dup (λ () b₁)])
    (match b₀
      [#t (no-dup)]
      [#f #f]
-     ['b.⊤ (and (no-dup) 'b.⊤)])))
+     ['b.⊤ (and (no-dup) 'b.⊤)]
+     [_ (error 'b∧ "Bad boolean♯ ~a" b₀)])))
 
 (define (b¬ b) (if (eq? b 'b.⊤) 'b.⊤ (not b)))
 

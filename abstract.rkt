@@ -5,7 +5,8 @@
          (for-syntax syntax/parse racket/base racket/match racket/syntax
                      (only-in racket/string string-join))
          racket/match racket/dict racket/set racket/list
-         racket/unit)
+         racket/unit
+         racket/trace)
 (provide abstract-semantics@)
 #|
 The abstract semantics differs from the concrete semantics in the following ways:
@@ -52,10 +53,8 @@ The abstract semantics differs from the concrete semantics in the following ways
     [(_ _) #f])
 
   (define (ffun-equal? f₀ f₁)
-    (if abs?
-        (b∧ (ffun-⊑? f₀ f₁)
-            (ffun-⊑? f₁ f₀))
-        (concrete-ffun-equal? f₀ f₁)))
+    (b∧ (ffun-⊑? f₀ f₁)
+        (ffun-⊑? f₁ f₀)))
 
   ;; Slow path: linearly look for a key "equal" to k with "equal" values.
   (define (slow-equal k v f)
@@ -68,7 +67,7 @@ The abstract semantics differs from the concrete semantics in the following ways
             (match (dict-ref f₁ k -unmapped)
               [(== -unmapped eq?) (slow-equal k v f₁)]
               [v₁ ;; fast path: check the structurally equal key
-               (b∨ (a/equal? v₀ v₁)
+               (b∨ (a/equal? v v₁)
                    (slow-equal k v f₁))])))
 
   (define (concrete-ffun-equal? m₀ m₁)
@@ -167,7 +166,7 @@ The abstract semantics differs from the concrete semantics in the following ways
 
   (a/equal? d₀ d₁))
 
-(define (a/match pattern data store-spaces ρ μ)
+(define (a/match pattern data ρ store-spaces μ)
   ;; inner returns the quality of the match and the updated map.
   (define (inner pattern data ρ)
     (match* (pattern data)
@@ -198,8 +197,9 @@ The abstract semantics differs from the concrete semantics in the following ways
       [((? Rvar?) x) (error 'a/match "Unexpected reference in match pattern ~a" x)]
 
       [(a₀ a₁) (values (a/equal? a₀ a₁ store-spaces μ) ρ)]))
-
+(trace inner)
   (inner pattern data ρ))
+(trace a/match)
 
 ;; Evaluation is marked with a "quality" to determine if the results follow a side-condition or pattern-match
 ;; that "may" fail. This qualification is to reuse evaluation for the semantics of meta-functions,
@@ -218,7 +218,16 @@ The abstract semantics differs from the concrete semantics in the following ways
       ;; We get a set of results from expr. We expect these results to be sets.
       ;; We want to embody any (all) choices from these sets, so we flatten them into
       ;; a set of possible results.
-      [(Choose _ expr) (for/union ([res-set (in-set (eval* expr))]) res-set)]
+      [(Choose _ expr)
+       (for/fold ([acc ∅]) ([res-set (in-set (inner expr ρ store-spaces μ incoming-quality))])
+         (match-define (Abs-Result/effect quality vset store-spaces* μ*) res-set)
+         (cond
+          [(set? vset)
+           (for/fold ([acc acc]) ([v (in-set vset)])
+             (set-add acc (Abs-Result/effect quality v store-spaces* μ*)))]
+          [else
+           (log-info (format "May have chosen from non-set ~a" vset))
+           acc]))]
 
       ;; ASSUMPTION: pat has been pre-transformed so that recursive constructions
       ;; are routed through the store(s)
@@ -227,32 +236,32 @@ The abstract semantics differs from the concrete semantics in the following ways
 ;;; Always reads? expressions
       ;; reads? is true
       [(Store-lookup _ kexpr)
-       (for/set ([kres (in-set (eval* kexpr))])
+       (for/set ([kres (in-set (inner kexpr ρ store-spaces μ incoming-quality))])
          (match-define (Abs-Result/effect quality kv store-spaces* μ*) kres)
-         (Abs-Result/effect (b∧ incoming-quality quality) (store-ref store-spaces kv) store-spaces* μ*))]
+         (Abs-Result/effect quality (store-ref store-spaces kv) store-spaces* μ*))]
 
 ;;; allocs? is true
       ;; XXX: Should unqualified alloc forms be allowed?
       [(SAlloc _ space)
-       (define addr (alloc ς))
+       (define addr (alloc ς ρ))
        (set (Abs-Result/effect incoming-quality
                                (Address-Structural space addr)
                                store-spaces
                                (μ+ μ addr 1)))]
       [(QSAlloc _ space hint)
-       (define addr (alloc ς hint))
+       (define addr (alloc ς ρ hint))
        (set (Abs-Result/effect incoming-quality
                                (Address-Structural space addr)
                                store-spaces
                                (μ+ μ addr 1)))]
       [(MAlloc _ space)
-       (define addr (alloc ς))
+       (define addr (alloc ς ρ))
        (set (Abs-Result/effect incoming-quality
                                (Address-Egal space addr)
                                store-spaces
                                (μ+ μ addr 1)))]
       [(QMAlloc _ space hint)
-       (define addr (alloc ς hint))
+       (define addr (alloc ς ρ hint))
        (set (Abs-Result/effect incoming-quality
                                (Address-Egal space addr)
                                store-spaces
@@ -261,9 +270,9 @@ The abstract semantics differs from the concrete semantics in the following ways
 ;;; Depend on others
       ;; cards? true
       [(Equal _ l r)
-       (for/fold ([acc ∅]) ([lres (in-set (slow-expression-eval l ρ store-spaces μ incoming-quality))])
+       (for/fold ([acc ∅]) ([lres (in-set (inner l ρ store-spaces μ incoming-quality))])
          (match-define (Abs-Result/effect quality lv store-spaces* μ*) lres)
-         (for/fold ([acc acc]) ([rres (in-set (slow-expression-eval r ρ store-spaces* μ* quality))])
+         (for/fold ([acc acc]) ([rres (in-set (inner r ρ store-spaces* μ* quality))])
            (match-define (Abs-Result/effect rquality rv store-spaces** μ**) rres)
            (for/fold ([acc acc]) ([b (in-set (⦃b⦄ (a/equal? lv rv store-spaces** μ**)))])
              (Abs-Result/effect rquality b store-spaces** μ**))))]
@@ -282,7 +291,7 @@ The abstract semantics differs from the concrete semantics in the following ways
        (define do-default
          (if default?
              (λ (store-spaces μ outgoing-quality [if-bad #f])
-                (inner dexpr ρ store-spaces* μ* outgoing-quality))
+                (inner dexpr ρ store-spaces μ outgoing-quality))
              (λ (store-spaces μ outgoing-quality [if-bad #f])
                 (when (procedure? if-bad) (if-bad))
                 ∅)))
@@ -305,7 +314,8 @@ The abstract semantics differs from the concrete semantics in the following ways
                       (b∨ found? 'b.⊤))])))
               (match found?
                 [#t res*]
-                [_ (set-union res* (do-default store-spaces* μ* quality))])))]
+                [_ (set-union res* (do-default store-spaces* μ* quality))])))
+          res]
          [(discrete-ffun map)
           (for/fold ([res ∅]) ([kres (in-set ks)])
             (match-define (Abs-Result/effect quality k store-spaces* μ*) kres)
@@ -330,7 +340,8 @@ The abstract semantics differs from the concrete semantics in the following ways
                (set-union res
                           (do-default store-spaces* μ* quality
                                       (λ () (log-info (format "Key unmapped in map ~a: ~a" m k)))))]
-              [v (set-add res (Abs-Result/effect quality v store-spaces* μ*))]))])]
+              [v (set-add res (Abs-Result/effect quality v store-spaces* μ*))]))]
+         [other (error 'map-lookup "Bad map ~a" other)])]
 
       ;; XXX: needs special threading
       [(Map-extend _ m kexpr vexpr trust-strong?)
@@ -372,15 +383,16 @@ The abstract semantics differs from the concrete semantics in the following ways
           ;; TODO?: allow non-determinism in vexpr to be absorbed into the abstract co-domain as a widening.
           (for/fold ([acc ∅]) ([kres (in-set ks)])
             (match-define (Abs-Result/effect kquality k store-spaces* μ*) kres)
-            (for/fold ([acc acc]) ([vres (in-set (inner vexpr store-spaces* μ* kquality))])
+            (for/fold ([acc acc]) ([vres (in-set (inner vexpr ρ store-spaces* μ* kquality))])
               (match-define (Abs-Result/effect vquality v store-spaces** μ**) vres)
               (set-add acc (Abs-Result/effect vquality (setter map k v) store-spaces** μ**))))]
          [(? dict? map)
           (for/fold ([acc ∅]) ([kres (in-set ks)])
             (match-define (Abs-Result/effect kquality k store-spaces* μ*) kres)
-            (for/fold ([acc acc]) ([vres (in-set (inner vexpr store-spaces* μ* kquality))])
+            (for/fold ([acc acc]) ([vres (in-set (inner vexpr ρ store-spaces* μ* kquality))])
               (match-define (Abs-Result/effect vquality v store-spaces** μ**) vres)
-              (set-add acc (Abs-Result/effect vquality (hash-set map k v) store-spaces** μ**))))])]
+              (set-add acc (Abs-Result/effect vquality (hash-set map k v) store-spaces** μ**))))]
+         [other (error 'map-extend "Bad map? ~a" other)])]
 
       ;; XXX: needs special threading
       [(If _ g t e)
@@ -388,14 +400,15 @@ The abstract semantics differs from the concrete semantics in the following ways
          (match-define (Abs-Result/effect gquality g store-spaces* μ*) gres)
          (set-union acc
                     (if g
-                        (inner t store-spaces* μ* gquality)
-                        (inner e store-spaces* μ* gquality))))]
+                        (inner t ρ store-spaces* μ* gquality)
+                        (inner e ρ store-spaces* μ* gquality))))]
 
       ;; Really match-let
       [(Let _ bindings bexpr)
-       (inner bindings ρ store-spaces μ incoming-quality
-                           (λ (ρ store-spaces μ quality)
-                              (inner bexpr ρ store-spaces μ quality)))]
+       (slow-eval-bindings
+        ς bindings ρ store-spaces μ incoming-quality
+        (λ (ρ store-spaces μ quality)
+           (inner bexpr ρ store-spaces μ quality)))]
 
       [(In-Dom _ m kexpr)
        (define ks (inner kexpr ρ store-spaces μ incoming-quality))
@@ -419,7 +432,8 @@ The abstract semantics differs from the concrete semantics in the following ways
          [(? dict? map)
           (for/set ([kres (in-set ks)])
             (match-define (Abs-Result/effect kquality kv store-spaces* μ*) kres)
-            (Abs-Result/effect kquality (dict-has-key? map kv) store-spaces* μ*))])]
+            (Abs-Result/effect kquality (dict-has-key? map kv) store-spaces* μ*))]
+         [other (error 'slow-expression-eval "Bad map? ~a" other)])]
 
       [(Set-Union _ exprs)
        (define logged (mutable-set))
@@ -443,12 +457,13 @@ The abstract semantics differs from the concrete semantics in the following ways
                 (unless (set-member? logged v)
                   (log-info (format "Cannot union non-set ~a" v))
                   (set-add! logged v))
-                results]))]))]
+                results]))]
+           [_ (error 'set-union "bad exprs ~a" exprs)]))]
 
       [(Set-Add* _ set-expr exprs)
        (for/fold ([results ∅])
            ([setres (in-set (inner set-expr ρ store-spaces μ incoming-quality))])
-         (match-define (Abs-Result/effect squality setv store-spaces* μ*))
+         (match-define (Abs-Result/effect squality setv store-spaces* μ*) setres)
          (cond
           [(set? setv)
            (let ev-all ([quality squality]
@@ -463,7 +478,8 @@ The abstract semantics differs from the concrete semantics in the following ways
                     ([res (in-set (inner expr ρ store-spaces μ quality))])
                   (match-define (Abs-Result/effect vquality v store-spaces* μ*) res)
                   (set-union results
-                             (ev-all vquality exprs (set-add cur-set v) store-spaces* μ*)))]))]
+                             (ev-all vquality exprs (set-add cur-set v) store-spaces* μ*)))]
+               [_ (error 'set-add* "Bad exprs ~a" exprs)]))]
           [else
            (log-info (format "Cannot add to non-set ~a" setv))
            results]))]
@@ -473,12 +489,12 @@ The abstract semantics differs from the concrete semantics in the following ways
       [(In-Set _ set-expr expr)
        (for/fold ([results ∅])
            ([setres (in-set (inner set-expr ρ store-spaces μ incoming-quality))])
-         (match-define (Abs-Result/effect squality setv store-spaces* μ*))
+         (match-define (Abs-Result/effect squality setv store-spaces* μ*) setres)
          (cond
           [(set? setv)
            (for/fold ([results results])
                ([vres (in-set (inner expr ρ store-spaces* μ* squality))])
-             (match-define (Abs-Result/effect vquality v store-spaces** μ**) res)
+             (match-define (Abs-Result/effect vquality v store-spaces** μ**) vres)
              (for/fold ([results results])
                  ([b (in-set (⦃b⦄ (for/b∨ ([sv (in-set setv)])
                                           (a/equal? sv v store-spaces** μ**))))])
@@ -488,7 +504,10 @@ The abstract semantics differs from the concrete semantics in the following ways
            (log-info (format "In-Set given non-set ~a" setv))
            results]))]
 
+      [(? boolean? b) (set (Abs-Result/effect incoming-quality b store-spaces μ))]
+
       [bad (error 'expr-eval "Bad expression ~a" bad)])))
+(trace slow-expression-eval)
 
 ;; Binding/Store-extend/When are side-effecting statements (local/global/control).
 ;; They are available at the top level and in Let expressions.
@@ -496,20 +515,21 @@ The abstract semantics differs from the concrete semantics in the following ways
 (define (slow-eval-bindings ς bindings ρ store-spaces μ incoming-quality kont)
   (let proc-bindings ([quality incoming-quality] [bindings bindings] [ρ ρ] [store-spaces store-spaces] [μ μ])
     (match bindings
-      ['() (kont ρ store-spaces μ)]
-      [(cons (and binding (Binding pat cexpr)) bindings)
+      ['() (kont ρ store-spaces μ quality)]
+      [(cons binding bindings)
        (match binding
          [(Binding pat cexpr)
           (for/fold ([acc ∅])
               ([cvres (in-set (slow-expression-eval ς cexpr ρ store-spaces μ quality))])
             (match-define (Abs-Result/effect cquality cv store-spaces* μ*) cvres)
-            (match/values (a/match pat cv ρ store-spaces*)
+            (match/values (a/match pat cv ρ store-spaces* μ)
               [(#f _) acc]
-              [(#t ρ)
-               (set-union acc (proc-bindings cquality bindings ρ store-spaces* μ*))]
-              [('b.⊤ ρ)
+              [(#t ρ*)
+               (set-union acc (proc-bindings cquality bindings ρ* store-spaces* μ*))]
+              [('b.⊤ ρ*)
                (log-info (format "Possible failed match in let ~a ~a" binding cv))
-               (set-union acc (proc-bindings b.⊤ bindings ρ store-spaces* μ*))]))]
+               (set-union acc (proc-bindings 'b.⊤ bindings ρ* store-spaces* μ*))]
+              [(b♯ _) (error 'proc-bindings "Bad boolean♯ ~a" b♯)]))]
 ;;; Always writes?
          ;; TODO: allow approximation that stores evaluation of val-expr directly into store.
          [(Store-extend key-expr val-expr trust-strong?)
@@ -519,22 +539,25 @@ The abstract semantics differs from the concrete semantics in the following ways
                              (λ (store-spaces k v) (store-set store-spaces k (set v)))
                              store-add))
           (for/fold ([results ∅])
-              ([kres (in-set (slow-expression-eval ς key-expr store-spaces ρ μ quality))])
+              ([kres (in-set (slow-expression-eval ς key-expr ρ store-spaces μ quality))])
             (match-define (Abs-Result/effect kquality k store-spaces* μ*) kres)
             (for/fold ([results results])
-                ([vres (in-set (slow-expression-eval ς val-expr store-spaces* μ* kquality))])
+                ([vres (in-set (slow-expression-eval ς val-expr ρ store-spaces* μ* kquality))])
               (match-define (Abs-Result/effect vquality v store-spaces** μ**) vres)
               (set-union results
                          (proc-bindings vquality bindings ρ (setter store-spaces** k v) μ**))))]
          [(When expr)
           (for/fold ([results ∅])
-              ([vres (in-set (slow-expression-eval ς expr store-spaces ρ μ quality))])
+              ([vres (in-set (slow-expression-eval ς expr ρ store-spaces μ quality))])
             (match-define (Abs-Result/effect vquality v store-spaces* μ*) vres)
             (cond
              [v
               (set-union results
+                         ;; XXX: The one place that the quality can change
                          (proc-bindings (b∧ vquality v) bindings ρ store-spaces* μ*))]
-             [else results]))])])))
+             [else results]))]
+         [_ (error 'proc-bindings "Bad binding ~a" binding)])]
+      [_ (error 'proc-bindings "Bad bindings ~a" bindings)])))
 
 (define (slow-rule-eval rule ς)
   (match-define (Rule name lhs rhs binding-side-conditions) rule)
@@ -543,7 +566,7 @@ The abstract semantics differs from the concrete semantics in the following ways
     [(#f _) ∅]
     [(b♯ ρ)
      (slow-eval-bindings ς
-      binding-side-conditions ρ store-spaces μ incoming-quality
+      binding-side-conditions ρ store-spaces μ #t
       (λ (ρ store-spaces μ quality) ;; FIXME: quality??
          (when (eq? quality 'b.⊤)
            (log-info

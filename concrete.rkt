@@ -181,7 +181,9 @@ in the spaces.rkt format.
     [(or (SAlloc _ space) (QSAlloc _ space _))
      (set (Result/effect (Address-Structural space (gensym)) store-spaces))]
 
-[bad (error 'expr-eval "Bad expression ~a" bad)]))
+    [(? boolean? b) (set (Result/effect b store-spaces))]
+
+    [bad (error 'expr-eval "Bad expression ~a" bad)]))
 
 (define (bindings-eval bindings ρ store-spaces kont)
   (let proc-bindings ([bindings bindings] [ρ ρ] [store-spaces store-spaces])
@@ -217,7 +219,6 @@ in the spaces.rkt format.
     [ρ
      (bindings-eval binding-side-conditions ρ store-spaces
                     (λ (ρ store-spaces)
-                       (printf "Eval'd to ~a ~a ~a" rhs ρ (pattern-eval rhs ρ))
                        (set (State (pattern-eval rhs ρ) store-spaces))))]))
 
 (define (rule-eval rule st)

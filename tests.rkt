@@ -1,5 +1,5 @@
 #lang racket/base
-(require "spaces.rkt" "shared.rkt" "transform.rkt" "concrete.rkt"
+(require "spaces.rkt" "shared.rkt" "transform.rkt" "concrete.rkt" "abstract.rkt"
          (for-syntax syntax/parse racket/base)
          racket/unit
          racket/pretty racket/set racket/match)
@@ -58,6 +58,28 @@
   (define Ξ #hash()) ;; No meta-functions in simple CESK.
   (define L CESK-lang))
 
+(define-unit CESK-abs-parms@
+  (import)
+  (export language-parms^)
+  (define alloc
+    (λ (ς meta-ρ [hint #f])
+       (match-define
+        (Abs-State (variant (== vstate eq?)
+                            (vector (variant (Variant 'Closure _) (vector e ρ)) κ)) σ μ)
+        ς)
+       (match hint
+         [`(application ,(Variant-field 'State 1) ,(Variant-field 'Kcons 1))
+          (cons e hint)]
+         [`(argument-eval ,(Variant-field 'State 1) ,(Variant-field 'Kcons 1))
+          ;; should be an address
+          (hash-ref meta-ρ 'κ (λ () (error 'alloc "Expected to be called with env containing κ ~a" meta-ρ)))]
+         [`(function-eval (Let-binding 0))
+          (cons (hash-ref meta-ρ 'x (λ () (error 'alloc "Expected to be called with env containing x ~a" meta-ρ)))
+                hint)]
+         [_ (error 'alloc "Bad hint ~a" hint)])))
+  (define Ξ #hash())
+  (define L CESK-lang))
+
 (define-values/invoke-unit/infer
   (export language-impl^)
   #;
@@ -65,11 +87,7 @@
                   [c/expression-eval expression-eval]
                   [c/rule-eval rule-eval]
                   [c/mf-eval mf-eval]))
-  (link CESK-conc-parms@ concrete-semantics@))
-(define (c/apply-reduction-relation rules)
-  (apply-reduction-relation rule-eval rules))
-(define (c/apply-reduction-relation* rules)
-  (apply-reduction-relation* rule-eval rules))
+  (link CESK-abs-parms@ abstract-semantics@))
 
 (define CESK-reduction
   (list
@@ -119,31 +137,38 @@
                (Binding (Avar 'ρ*) (Map-extend #t 'ρ (Term #t (Rvar 'x)) (Term #t (Rvar 'a)) #f))
                (Store-extend (Term #t (Rvar 'a)) (Term #t (Rvar 'v)) #f)))))
 
-(let-values ([(abs-lang rec-addrs abstract-spaces) (abstract-language CESK-lang)])
-  (printf "Abstract language:~%") (pretty-print abs-lang)
-  (printf "Recursive positions:~%") (pretty-print rec-addrs)
-  (printf "Abstract spaces:~%") (pretty-print abstract-spaces)
-  (newline)
-  (define abs-semantics
-    (for/list ([rule (in-list CESK-reduction)])
-      (abstract-rule abs-lang rec-addrs #hash() rule)))
-  (when #t
-    (pretty-print abs-semantics))
-  (define-values (hint-fn hint-stx)
-    (alloc-skeleton abs-semantics #hash()))
-  (pretty-print (syntax->datum hint-stx)))
+(define-values (abs-lang rec-addrs abstract-spaces)
+  (abstract-language CESK-lang))
+(printf "Abstract language:~%") (pretty-print abs-lang)
+(printf "Recursive positions:~%") (pretty-print rec-addrs)
+(printf "Abstract spaces:~%") (pretty-print abstract-spaces)
+(newline)
+(define abs-semantics
+  (for/list ([rule (in-list CESK-reduction)])
+    (abstract-rule abs-lang rec-addrs #hash() rule)))
+(when #t
+  (pretty-print abs-semantics))
+(define-values (hint-fn hint-stx) (alloc-skeleton abs-semantics #hash()))
+(displayln (syntax->datum hint-stx))
+
+(define (c/apply-reduction-relation rules)
+  (apply-reduction-relation rule-eval rules))
+(define (c/apply-reduction-relation* rules)
+  (apply-reduction-relation*/memo rule-eval rules))
 
 (define (inject L e)
   (define term (sexp-to-dpattern/check e 'Expr L))
-  (mk-State (variant vstate (vector (variant vclo (vector term #hash()))
-                                    (variant vmt #())))))
+  (mk-Abs-State (variant vstate (vector (variant vclo (vector term #hash()))
+                                        (variant vmt #())))))
 (define (run L expr)
   ((c/apply-reduction-relation* CESK-reduction) (inject L expr)))
+(define (a/run L expr)
+  ((c/apply-reduction-relation* abs-semantics) (inject L expr)))
 (parameterize ([current-logger (make-logger 'match-info)])
  (log-thread 'info)
- (for/list ([out (in-set (run CESK-lang '(App (Lam x (Ref x))
+ (for/list ([out (in-set (a/run CESK-lang '(App (Lam x (Ref x))
                                               (Lam y (Ref y)))))])
-   (match-define (State tm store-spaces) out)
-   (printf "(State ~a ~a)~%" (dpattern->sexp tm) store-spaces)
+   (match-define (Abs-State tm store-spaces μ) out)
+   (printf "(Abs-State ~a ~a ~a)~%" (dpattern->sexp tm) store-spaces μ)
    out))
-(sleep 2)
+(sleep 1)
