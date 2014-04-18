@@ -231,12 +231,6 @@ The abstract semantics differs from the concrete semantics in the following ways
          (match-define (Abs-Result/effect quality kv store-spaces* μ*) kres)
          (Abs-Result/effect (b∧ incoming-quality quality) (store-ref store-spaces kv) store-spaces* μ*))]
 
-      ;; reads? and cards? are true, since we don't do
-      ;; further analysis on what is compared
-      [(Equal _ l r)
-       (for/set ([b (in-set (⦃b⦄ (a/equal? l r store-spaces μ)))])
-         (Abs-Result/effect incoming-quality b store-spaces μ))]
-
 ;;; allocs? is true
       ;; XXX: Should unqualified alloc forms be allowed?
       [(SAlloc _ space)
@@ -265,6 +259,15 @@ The abstract semantics differs from the concrete semantics in the following ways
                                (μ+ μ addr 1)))]
 
 ;;; Depend on others
+      ;; cards? true
+      [(Equal _ l r)
+       (for/fold ([acc ∅]) ([lres (in-set (slow-expression-eval l ρ store-spaces μ incoming-quality))])
+         (match-define (Abs-Result/effect quality lv store-spaces* μ*) lres)
+         (for/fold ([acc acc]) ([rres (in-set (slow-expression-eval r ρ store-spaces* μ* quality))])
+           (match-define (Abs-Result/effect rquality rv store-spaces** μ**) rres)
+           (for/fold ([acc acc]) ([b (in-set (⦃b⦄ (a/equal? lv rv store-spaces** μ**)))])
+             (Abs-Result/effect rquality b store-spaces** μ**))))]
+
       ;; depending of mf analysis, the interaction can be anything
       [(Meta-function-call _ f arg)
        ;; meta-functions also have non-deterministic choice.

@@ -120,14 +120,18 @@
                (Store-extend (Term #t (Rvar 'a)) (Term #t (Rvar 'v)) #f)))))
 
 (let-values ([(abs-lang rec-addrs abstract-spaces) (abstract-language CESK-lang)])
-  (pretty-print abs-lang)
-  (pretty-print rec-addrs)
-  (pretty-print abstract-spaces)
-  (when #f
-    (pretty-print (for/list ([rule (in-list CESK-reduction)])
-                    (abstract-rule abs-lang rec-addrs #hash() rule))))
+  (printf "Abstract language:~%") (pretty-print abs-lang)
+  (printf "Recursive positions:~%") (pretty-print rec-addrs)
+  (printf "Abstract spaces:~%") (pretty-print abstract-spaces)
+  (newline)
+  (define abs-semantics
+    (for/list ([rule (in-list CESK-reduction)])
+      (abstract-rule abs-lang rec-addrs #hash() rule)))
   (when #t
-    (pretty-print (abstract-rule abs-lang rec-addrs #hash() (rule-lookup CESK-reduction 'argument-eval)))))
+    (pretty-print abs-semantics))
+  (define-values (hint-fn hint-stx)
+    (alloc-skeleton abs-semantics #hash()))
+  (pretty-print (syntax->datum hint-stx)))
 
 (define (inject L e)
   (define term (sexp-to-dpattern/check e 'Expr L))

@@ -14,7 +14,7 @@ The key ideas:
 * Recursive data structure construction sites are counted to inform alloc how many addresses to create.
 * ASSUMPTION: distinct addresses are desired for these syntactically distinct allocation points.
 
-PLANNED FEATURES:
+ADDITIONAL FEATURES:
 - abstract counting for better equality matching
 
 WISHLIST (! is done):
@@ -33,7 +33,7 @@ FIXMEs:
   This nuance is lost in translation.
 - We need to track positions where maps flow, and what the expected spaces are, so we can mark them
   as abstract (with pointer to cardinality analysis) or not when constructing them.
-
+- Synthesize a skeleton alloc function.
 |#
 
 (require graph
@@ -41,7 +41,8 @@ FIXMEs:
          racket/trace
          "spaces.rkt"
          "shared.rkt")
-(provide abstract-language abstract-rule)
+(provide abstract-language abstract-rule
+         alloc-skeleton)
 
 ;; language->graph : Language → unweighted-directed-graph
 (define (language-spaces->graph spaces)
@@ -137,7 +138,6 @@ FIXMEs:
   (define-values (variant-rec-addrs abstract-spaces₁)
     (for/fold ([rec-addrs ρ₀] [abstract-spaces abstract-spaces₀])
         ([(name space) (in-dict spaces)])
-      (printf "Processing ~a: ~a~%" name space)
       (match space
         [(or (? External-Space?) (? Address-Space?)) (values rec-addrs abstract-spaces)]
         [(User-Space variants-or-components trusted?)
@@ -253,7 +253,7 @@ FIXMEs:
        (define abs-space
          (match space
            [(or (? External-Space?) (? Address-Space?))
-            spaces]
+            space]
 
            [(User-Space variants trust-recursion?)
             (define abs-variants
@@ -399,10 +399,10 @@ FIXMEs:
   (if (variant? pat)
       (let-values ([(pat* binding-scs) (flatten-pattern rec-addrs pat '() #f)])
         (values (Bvar new-bvar (Address-Space 'AAM))
-                (cons (Binding pat* (Choose (Store-lookup #t (Term (Rvar new-bvar)))))
+                (cons (Binding pat* (Choose #t (Store-lookup #t (Term #t (Rvar new-bvar)))))
                       binding-scs)))
       (values (Bvar new-bvar (Address-Space 'AAM))
-              (list (Binding pat (Choose (Store-lookup #t (Term (Rvar new-bvar)))))))))
+              (list (Binding pat (Choose #t (Store-lookup #t (Term #t (Rvar new-bvar)))))))))
 
 ;; flatten-pattern : Pattern Option[Set[List[Component-Address]]] → (values Pattern List[Binding-side-conditions])
 (define (flatten-pattern rec-addrs pat rev-addr [rec-positions #f])
@@ -410,9 +410,9 @@ FIXMEs:
          (emit-binding-sc rec-addrs pat)]
         [else
          (match pat
-           [(variant v pats)
+           [(variant (and v (Variant name _)) pats)
             ;; Trusted spaces' variants are all given an empty set of recursive references.
-            (define rec-positions (hash-ref rec-addrs (Variant-name v) ∅))
+            (define rec-positions (hash-ref rec-addrs name ∅))
             (define pats* (make-vector (vector-length pats)))
             ;; OPT-OP: consider an RRB-tree for binding-scs if it's a bottleneck.
             (define binding-scs*
@@ -422,13 +422,13 @@ FIXMEs:
                 (define indexed-addresses
                   (for/set ([pos (in-set rec-positions)]
                             #:when (match pos
-                                     [(cons (Variant-field (== v)
+                                     [(cons (Variant-field (== name)
                                                            (== i equal?))
                                             rest) #t]
                                      [_ #f]))
                     pos))
                 (define-values (pat* binding-scs*)
-                  (flatten-pattern rec-addrs pat (list (Variant-field v i)) indexed-addresses))
+                  (flatten-pattern rec-addrs pat (list (Variant-field name i)) indexed-addresses))
                 (unsafe-vector-set! pats* i pat*)
                 (append (reverse binding-scs*) binding-scs)))
             (values (variant v pats*)
@@ -439,14 +439,14 @@ FIXMEs:
 (define (check-and-rewrite-term rec-addrs alloc-tag tm)
   ;; if current position is recursive, hoist pattern out into allocation+store-update.
   ;; Hoist inside-out in order to do it in one pass.
-  (let recur ([current-variant #f]
-              [rev-addr '()]
-              [rev-local-addr '()]
-              [tm tm])
+  (define (recur current-variant rev-addr rev-local-addr tm)
     (define rec-addresses
       (if current-variant (hash-ref rec-addrs current-variant ∅) ∅))
+    (printf "Checking ~a ∈ ~a~%"
+            (reverse rev-local-addr) rec-addresses)
     (cond
-     [(set-member? rec-addresses (reverse rev-addr))
+     [(set-member? rec-addresses (reverse rev-local-addr))
+      (printf "Success~%")
       (define address-var (gensym))
       (define-values (pat* store-updates)
         (recur #f rev-addr '() tm))
@@ -454,13 +454,14 @@ FIXMEs:
       (values (Rvar address-var)
               (append store-updates
                       (list (Binding (Avar address-var)
-                                     (QSAlloc #f (cons alloc-tag (reverse rev-addr))))
-                            (Store-extend (Term #t (Rvar address-var))
+                                     (QSAlloc #f 'AAM (cons alloc-tag (reverse rev-addr))))
+                            (Store-extend #t
+                                          (Term #t (Rvar address-var))
                                           (Term #t pat*)))))]
      [else
       (match tm
         [(Bvar x _) (error 'abstract-rule "Rule RHS may not bind ~a" tm)]
-        [(variant v pats)
+        [(variant (and v (Variant name _)) pats)
          (define len (vector-length pats))
          (define pats* (make-vector len))
          ;; TODO?: error/warn if space defining vname is trusted.
@@ -471,16 +472,19 @@ FIXMEs:
               [(= i len) (reverse rev-store-updates)]
               [else
                (define pat (unsafe-vector-ref pats i))
-               (define vfield (Variant-field v i))
+               (define vfield (Variant-field name i))
                (define-values (pat* store-updates*)
-                 (recur (Variant-name v) (cons vfield rev-addr)
+                 (recur name (cons vfield rev-addr)
                         (list vfield)
                         pat))
                (unsafe-vector-set! pats* i pat*)
                (rewrite-pats (add1 i)
                              (append (reverse store-updates*) rev-store-updates))])))
          (values (variant v pats*) store-updates)]
-        [other (values other '())])])))
+        [other (values other '())])]))
+  (trace recur)
+  (recur #f '() '() tm))
+(trace check-and-rewrite-term)
 
 (define (abstract-meta-function L rec-addrs ΞΔ mf)
   (match-define (Meta-function name rules trusted-implementation/conc trusted-implementation/abs) mf)
@@ -500,31 +504,10 @@ FIXMEs:
   (define-values (lhs* lhs-binding-side-conditions)
     (flatten-pattern rec-addrs lhs '() #f))
 
-  ;; TODO: Finally we rewrite the binding side-conditions to go between the
+  ;; Finally we rewrite the binding side-conditions to go between the
   ;; lhs and rhs bindings/side-conditions
-  ;; XXX: Term expressions can lead to store updates. We need a store-threading mechanism.
   (define binding-side-conditions*
-    (let transform-bscs ([bscs binding-side-conditions] [i 0])
-      (match bscs
-        ['() '()]
-        [(cons (Binding pat expr) bscs)
-         (define expr*
-           (abstract-expression rec-addrs ΞΔ `(,rule-name Binding ,i) expr))
-         (define-values (pat* bscs-for-pat*)
-           (flatten-pattern rec-addrs pat '() #f))
-         (cons (Binding pat* expr*) (append bscs-for-pat* (transform-bscs bscs)))]
-        [(cons (Store-extend kexpr vexpr trust-strong?) bscs)
-         (define kvar (gensym 'st-ext-key))
-         (define vvar (gensym 'st-ext-val))
-         (list*
-          (Binding (Avar kvar)
-                   (abstract-expression rec-addrs ΞΔ `(,rule-name STE-key ,i) kexpr))
-          (Binding (Avar vvar)
-                   (abstract-expression rec-addrs ΞΔ `(,rule-name STE-val ,i) vexpr))
-          (Store-extend (Term (Rvar kvar)) (Term (Rvar vvar)) trust-strong?)
-          (transform-bscs bscs (add1 i)))]
-        [(cons expr bscs)
-         (cons (abstract-expression rec-addrs ΞΔ `(,rule-name SC ,i) expr) (transform-bscs bscs))])))
+    (abstract-bindings rec-addrs ΞΔ '() binding-side-conditions reverse))
 
   ;; We now need to flatten the lhs pattern, and all patterns in binding-side-conditions.
   ;; The RHS pattern needs its recursive positions replaced with allocated addresses and
@@ -538,6 +521,46 @@ FIXMEs:
                                     binding-side-conditions*
                                     store-updates)))
 
+(define (abstract-bindings rec-addrs ΞΔ rev-addr bscs kont)
+  (define bind (bind* rec-addrs ΞΔ))
+  (let let-recur ([bindings bscs] [i 0] [bindings* '()])
+    (match bindings
+      ['() (kont bindings*)]
+      [(cons binding bindings)
+       (define (continue bindings*) (let-recur bindings (add1 i) bindings*))
+       (match binding
+         [(Binding pat expr)
+          (bind expr
+                (cons `(Let-binding ,i) rev-addr)
+                (λ (e*)
+                   (define-values (pat* bscs-for-pat*)
+                     (flatten-pattern rec-addrs pat '() #f))
+                   (continue (append (reverse (cons (Binding pat* e*) bscs-for-pat*))
+                                     bindings*))))]
+         [(Store-extend kexpr vexpr trust-strong?)
+          (bind kexpr
+                (cons `(Let-store-key ,i) rev-addr)
+                (λ (k*)
+                   (bind vexpr
+                         (cons `(Let-store-val ,i) rev-addr)
+                         (λ (v*)
+                            (continue (cons (Store-extend k* v* trust-strong?) bindings*))))))]
+         [(When expr)
+          (bind expr
+                (cons `(When-expr ,i) rev-addr)
+                (λ (w*) (continue (cons (When w*) bindings*))))])])))
+  
+;; Encapsulates a pattern in the following function. If recur on expr
+;; changes the store, then bind in a let (expresses sequencing), pass the reference to the value.
+(define ((bind* rec-addrs ΞΔ) expr path fn [name #f])
+  (define-values (e* Δ?) (abstract-expression* rec-addrs ΞΔ expr path))
+  (cond
+   [Δ?
+    (define var (if name (gensym name) (gensym 'intermediate)))
+    (define-values (r dummy) (fn (Rvar var)))
+    (values (Let (list (Binding (Avar var) e*)) r) #t)]
+   [else (fn e*)]))
+
 ;; abstract-expression
 ;; An EPattern must be abstracted so that Term expressions are rewritten and
 ;; stores are threaded through meta-function-call's.
@@ -545,162 +568,215 @@ FIXMEs:
 ;; OPT-OP (ΞΔ): do analysis on meta-functions first to determine if they need to produce new stores,
 ;;              then only meta-function-call's that produce new stores get marked as changing store.
 (define (abstract-expression rec-addrs ΞΔ alloc-tag expr)
-  ;; Encapsulates a pattern in the following function. If recur on expr
-  ;; changes the store, then bind in a let (expresses sequencing), pass the reference to the value.
-  (define (bind expr path fn [name #f])
-    (define-values (e* Δ?) (recur expr path))
-    (cond
-     [Δ?
-      (define var (if name (gensym name) (gensym 'intermediate)))
-      (define-values (r dummy) (fn (Rvar var)))
-      (values (Let (list (Binding (Avar var) e*)) r) #t)]
-     [else (fn e*)]))
+  (abstract-expression* rec-addrs ΞΔ expr (list alloc-tag)))
 
-  (define (recur expr rev-addr)
-    (match expr
-      [(Term si pattern)
-       ;; We use the path taken to this expr as the tag for allocation.
-       (define-values (pat* store-updates)
-         (check-and-rewrite-term rec-addrs (reverse rev-addr) pattern))
-       ;; If no store updates, then no new store.
-       (cond
-        [(empty? store-updates) (values pat* #f)]
-        [else (values (Let #f store-updates pat*) #t)])]
+(define (abstract-expression* rec-addrs ΞΔ expr rev-addr)
+  (define bind (bind* rec-addrs ΞΔ))
+  (let recur ([expr expr] [rev-addr rev-addr])
+   (match expr
+     [(Term si pattern)
+      ;; We use the path taken to this expr as the tag for allocation.
+      (define-values (pat* store-updates)
+        (check-and-rewrite-term rec-addrs (reverse rev-addr) pattern))
+      ;; If no store updates, then no new store.
+      (cond
+       [(empty? store-updates) (values pat* #f)]
+       [else (values (Let #f store-updates pat*) #t)])]
 
-      ;; TODO: mark maps as abstract or not for correct abstraction.
-      [(Map-lookup si m kexpr default? dexpr)
-       (bind kexpr
-             (cons 'ML-key rev-addr)
-             (λ (k*)
-                (cond
-                 [default?
-                   (bind dexpr
-                         (cons 'ML-default rev-addr)
-                         (λ (d*)
-                            (values (Map-lookup si m k* #t d*) #f))
-                         'default)]
-                 [else (values (Map-lookup m k* #f #f) #f)]))
-             'key)]
+     [(Store-lookup si kexpr)
+      (bind kexpr
+            (cons 'SL-key rev-addr)
+            (λ (k*)
+               (values (Choose si (Store-lookup si k*)) #f))
+            'key)]
 
-      [(Map-extend si m kexpr vexpr trust-strong?)
-       (bind kexpr
-             (cons 'ME-key rev-addr)
-             (λ (k*)
-                (bind vexpr
-                      (cons 'ME-val rev-addr)
-                      (λ (v*)
-                         (values (Map-extend si m k* v* trust-strong?) #f))))
-             'key)]
+     ;; TODO: mark maps as abstract or not for correct abstraction.
+     [(Map-lookup si m kexpr default? dexpr)
+      (bind kexpr
+            (cons 'ML-key rev-addr)
+            (λ (k*)
+               (cond
+                [default?
+                  (bind dexpr
+                        (cons 'ML-default rev-addr)
+                        (λ (d*)
+                           (values (Map-lookup si m k* #t d*) #f))
+                        'default)]
+                [else (values (Map-lookup si m k* #f #f) #f)]))
+            'key)]
 
-      [(Meta-function-call si name arg-pat)
-       (bind (Term arg-pat)
-             (cons 'MF-arg rev-addr)
-             (λ (arg*)
-                (values (Meta-function-call si name arg*)
-                        ;; Consider store changes if Meta-function can change store.
-                        ;; Conservatively assume they can change.
-                        (hash-ref ΞΔ name #t))))]
+     [(Map-extend si m kexpr vexpr trust-strong?)
+      (bind kexpr
+            (cons 'ME-key rev-addr)
+            (λ (k*)
+               (bind vexpr
+                     (cons 'ME-val rev-addr)
+                     (λ (v*)
+                        (values (Map-extend si m k* v* trust-strong?) #f))))
+            'key)]
 
-      [(If si g t e)
-       (bind g
-             (cons 'If-guard rev-addr)
-             (λ (g*)
-                (define-values (t* tΔ?) (recur t (cons 'If-then rev-addr)))
-                (define-values (e* eΔ?) (recur e (cons 'If-else rev-addr)))
-                (values (If si g* t* e*) (or tΔ? eΔ?))))]
+     [(Meta-function-call si name arg-pat)
+      (bind (Term #t arg-pat)
+            (cons 'MF-arg rev-addr)
+            (λ (arg*)
+               (values (Meta-function-call si name arg*)
+                       ;; Consider store changes if Meta-function can change store.
+                       ;; Conservatively assume they can change.
+                       (hash-ref ΞΔ name #t))))]
 
-      ;; Let is tricky since it might have rebindings of the store, which need to be forwarded as the
-      ;; next store when translation goes forward.
+     [(If si g t e)
+      (bind g
+            (cons 'If-guard rev-addr)
+            (λ (g*)
+               (define-values (t* tΔ?) (recur t (cons 'If-then rev-addr)))
+               (define-values (e* eΔ?) (recur e (cons 'If-else rev-addr)))
+               (values (If si g* t* e*) (or tΔ? eΔ?))))]
 
-      [(Let si bindings body)
-       ;; In order to not get generated lets in let clauses,
-       ;; we bind Binding RHSs to variables that then get matched against their pattern.
-       (let let-recur ([bindings bindings] [i 0] [bindings* '()])
-         (match bindings
-           ['() (cond
-                 [(empty? bindings*)
-                  (recur body rev-addr)]
-                 [else
-                  (bind body
-                        (cons 'Let-body rev-addr)
-                        (λ (b*) (values (Let si (reverse bindings*) b*) #f)))])]
-           [(cons (Binding pat expr) bindings)
-            (bind expr
-                  (cons `(Let-binding ,i) rev-addr)
-                  (λ (e*)
-                     (define-values (pat* bscs-for-pat*)
-                       (flatten-pattern rec-addrs pat '() #f))
-                     (let-recur bindings
-                                (add1 i)
-                                (append (reverse (cons (Binding pat* e*) bscs-for-pat*))
-                                        bindings*))))]
-           [(cons (Store-extend kexpr vexpr trust-strong?) bindings)
-            (bind kexpr
-                  (cons `(Let-store-key ,i) rev-addr)
-                  (λ (k*)
-                     (bind vexpr
-                           (cons `(Let-store-val ,i) rev-addr)
-                           (λ (v*)
-                              (let-recur bindings
-                                         (add1 i)
-                                         (cons (Store-extend k* v* trust-strong?) bindings*))))))]
-           [(cons (When expr) bindings)
-            (bind expr
-                  (cons `(When-expr ,i) rev-addr)
-                  (λ (w*) (let-recur bindings (add1 i) (cons (When w*) bindings*))))]))]
+     ;; Let is tricky since it might have rebindings of the store, which need to be forwarded as the
+     ;; next store when translation goes forward.
 
-      [(Equal si lexpr rexpr)
-       (bind lexpr
-             (cons 'Equal-left rev-addr)
-             (λ (l*)
-                (bind rexpr
-                      (cons 'Equal-right rev-addr)
-                      (λ (r*)
-                         (values (Equal si l* r*) #f)))))]
+     [(Let si bindings body)
+      ;; In order to not get generated lets in let clauses,
+      ;; we bind Binding RHSs to variables that then get matched against their pattern.
+      (abstract-bindings
+       rec-addrs
+       ΞΔ
+       rev-addr
+       bindings
+       (λ (bindings*)
+          (cond
+           [(empty? bindings*) (recur body rev-addr)]
+           [else
+            (bind body
+                  (cons 'Let-body rev-addr)
+                  (λ (b*) (values (Let si (reverse bindings*) b*) #f)))])))]
 
-      [(In-Dom si mvar kexpr)
-       (bind kexpr
-             (cons 'In-Dom-key rev-addr)
-             (λ (k*) (values (In-Dom si mvar k*) #f)))]
+     [(Equal si lexpr rexpr)
+      (bind lexpr
+            (cons 'Equal-left rev-addr)
+            (λ (l*)
+               (bind rexpr
+                     (cons 'Equal-right rev-addr)
+                     (λ (r*)
+                        (values (Equal si l* r*) #f)))))]
 
-      [(Set-Union si sexprs)
-       (if (empty? sexprs)
-           (values (Empty-set) #f)
-           (let union-recur ([sexprs sexprs] [i 0] [sexprs* '()])
-             (match sexprs
-               ['() (values (Set-Union si (reverse sexprs*)) #f)]
-               [(cons s sexprs)
-                (bind s
-                      (cons `(Set-Union ,i) rev-addr)
-                      (λ (s*)
-                         (union-recur sexprs (add1 i) (cons s* sexprs*))))])))]
+     [(In-Dom si mvar kexpr)
+      (bind kexpr
+            (cons 'In-Dom-key rev-addr)
+            (λ (k*) (values (In-Dom si mvar k*) #f)))]
 
-      [(Set-Add* si sexpr vexprs)
-       (if (empty? vexprs)
-           (recur sexpr rev-addr)
-           (bind sexpr
-                 (cons 'Set-Add*-set rev-addr)
-                 (λ (s*)
-                    (let add*-recur ([vexprs vexprs] [i 0] [vexprs* '()])
-                      (match vexprs
-                        ['() (values (Set-Add* si s* (reverse vexprs*)) #f)]
-                        [(cons v vexprs)
-                         (bind v
-                               (cons `(Set-Add*-val ,i) rev-addr)
-                               (λ (v*)
-                                  (add*-recur vexprs (add1 i) (cons v* vexprs*))))])))))]
+     [(Set-Union si sexprs)
+      (if (empty? sexprs)
+          (values (Empty-set) #f)
+          (let union-recur ([sexprs sexprs] [i 0] [sexprs* '()])
+            (match sexprs
+              ['() (values (Set-Union si (reverse sexprs*)) #f)]
+              [(cons s sexprs)
+               (bind s
+                     (cons `(Set-Union ,i) rev-addr)
+                     (λ (s*)
+                        (union-recur sexprs (add1 i) (cons s* sexprs*))))])))]
+
+     [(Set-Add* si sexpr vexprs)
+      (if (empty? vexprs)
+          (recur sexpr rev-addr)
+          (bind sexpr
+                (cons 'Set-Add*-set rev-addr)
+                (λ (s*)
+                   (let add*-recur ([vexprs vexprs] [i 0] [vexprs* '()])
+                     (match vexprs
+                       ['() (values (Set-Add* si s* (reverse vexprs*)) #f)]
+                       [(cons v vexprs)
+                        (bind v
+                              (cons `(Set-Add*-val ,i) rev-addr)
+                              (λ (v*)
+                                 (add*-recur vexprs (add1 i) (cons v* vexprs*))))])))))]
       
-      [(In-Set si sexpr vexpr)
-       (bind sexpr
-             (cons 'In-Set-set rev-addr)
-             (λ (s*)
-                (bind vexpr 
-                      (cons 'In-Set-value rev-addr)
-                      (λ (v*)
-                         (values (In-Set si s* v*) #f)))))]
+     [(In-Set si sexpr vexpr)
+      (bind sexpr
+            (cons 'In-Set-set rev-addr)
+            (λ (s*)
+               (bind vexpr 
+                     (cons 'In-Set-value rev-addr)
+                     (λ (v*)
+                        (values (In-Set si s* v*) #f)))))]
 
-      [(or (? boolean?) (? Empty-set?) (? Unsafe-store-ref?)) (values expr #f)]
-      [_ (error 'abstract-expression "Bad expression ~a" expr)]))
-  (recur expr (list alloc-tag)))
+     [(SAlloc si space)
+      (values (QSAlloc si space (reverse rev-addr)) #f)]
+     [(MAlloc si space)
+      (values (QMAlloc si space (reverse rev-addr)) #f)]
+
+     [(or (? boolean?) (? Empty-set?) (? Unsafe-store-ref?)
+          (? QSAlloc?) (? QSAlloc?))
+      (values expr #f)]
+     [_ (error 'abstract-expression "Bad expression ~a" expr)])))
+
+;; Each allocation expression should be qualified with a distinct "hint" for
+;; where the allocation is happening. Using the hint as the address itself is
+;; too coarse, since every binding in the CESK machine would alias each other.
+;; We need an additional piece of information to distinguish addresses based
+;; on what is driving allocation, and not just where the allocation is taking place.
+
+;; We can't use any component of ς blindly, since they can contain addresses,
+;; which leads to a recursive address space, which leads to non-termination.
+;; Instead, ???
+;; alloc-skeleton : List[Rule] Map[MF-Name,Meta-function] → (values Alloc-Fn Syntax)
+(define (alloc-skeleton abs-rules abs-Ξ)
+  (values (λ (ς [hint #f]) hint)
+          #`(λ (ς hint)
+               (match-define (Abs-State term σ μ) ς)
+               (match hint
+                 #,@(alloc-hints abs-rules)
+                 #,@(for*/list ([mf (in-dict-values abs-Ξ)]
+                                #:unless (Meta-function-trusted-implementation/abs mf)
+                                [hint (in-list (alloc-hints (Meta-function-rules)))])
+                      hint)))))
+
+;; Create all the clauses for a user to fill in with better hints than the hint themselves.
+(define (alloc-hints rules)
+  (for/list ([hint (in-list (rules-hints rules))])
+    ;; quoted hint is the local variable introduced by alloc-skeleton.
+    #`[(quote #,hint) hint]))
+
+(define (rules-hints rules)
+  (hint-map (λ (rule tail)
+               (match-define (Rule name lhs rhs bscs) rule)
+               (bscs-hints bscs tail))
+            rules '()))
+
+(define (hint-map f lst tail)
+  (match lst
+    ['() tail]
+    [(cons a lst) (f a (hint-map f lst tail))]))
+
+(define (bscs-hints bscs tail) (hint-map bsc-hints bscs tail))
+
+(define (bsc-hints bsc tail)
+  (match bsc
+    [(or (Binding _ expr) (When expr)) (expression-hints expr tail)]
+    [(Store-extend kexpr vexpr _) (expression-hints kexpr (expression-hints vexpr tail))]))
+
+(define (expression-hints expr tail)
+  (match expr
+    [(or (Choose _ expr)
+         (Store-lookup _ expr)
+         (In-Dom _ _ expr))
+     (expression-hints expr tail)]
+    [(or (? SAlloc?) (? MAlloc?))
+     (error 'expression-hints "Unqualified allocation ~a" expr)]
+    [(or (QSAlloc _ _ hint) (QMAlloc _ _ hint)) (cons hint tail)]
+    [(or (Equal _ expr0 expr1)
+         (Map-lookup _ _ expr0 _ expr1)
+         (Map-extend _ _ expr0 expr1 _)
+         (In-Set _ expr0 expr1))
+     (expression-hints expr0 (if expr1 (expression-hints expr1 tail) tail))]
+    [(If _ g t e)
+     (expression-hints g (expression-hints t (expression-hints e tail)))]
+    [(Let _ bscs bexpr)
+     (bscs-hints bscs (expression-hints bexpr tail))]
+    [(Set-Union _ exprs) (hint-map expression-hints exprs tail)]
+    [(Set-Add* _ expr exprs)
+     (expression-hints expr (hint-map expression-hints exprs tail))]
+    [_ tail]))
 
 ;; [1] Might and Shivers ICFP 2006 "Improving flow analyses via ΓCFA: Abstract garbage collection and counting"
