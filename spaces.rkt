@@ -1,6 +1,6 @@
 #lang racket/base
 
-(require racket/set (for-syntax racket/base) racket/fixnum)
+(require racket/set (for-syntax racket/base) racket/fixnum racket/list)
 (provide (all-defined-out))
 #|
 Allow spaces to be inductively defined or provided with the promise that they are finite
@@ -10,11 +10,11 @@ Allow stores (special)
 
 |#
 
-;; A Language is a (Language Name Symbol Map[Space-name,Either[Space,Component]])
+;; A Language is a (Language Name Map[Space-name,Either[Space,Component]])
 ;; Where scope of space names is letrec*
 ;; All occurrences of the same named Variant are expected to have a total ordering.
 ;;   That is, some spaces may use a refined notion of a variant, but never a re-defined notion.
-(struct Language (name spaces) #:transparent)
+(struct Language (name spaces refinement-order) #:transparent)
 
 ;; TODO list for Language sanity checking:
 ;; - DONE (abstract-language): check for undefined spaces
@@ -100,7 +100,7 @@ Allow stores (special)
 ;;  NOTE: if not given, equality falls back on structural equality plus cardinality analysis.
 ;;
 ;; A user space may not have duplicate variants.
-(struct User-Space (variants trust-recursion?) #:transparent)
+(struct User-Space (variants trust-recursion? trust-construction?) #:transparent)
 (struct Address-Space (space) #:transparent)
 (struct External-Space (pred cardinality precision special-equality) #:transparent)
 
@@ -109,7 +109,9 @@ Allow stores (special)
 ;; - Any [such that the pred of some external space in the language is satisfied]
 (struct external (type v) #:transparent)
 
-;; A reduction semantics is a List[Rule]
+;; A reduction semantics is a (Reduction-Relation Space List[Rule])
+;; where every rule's lhs and rhs are patterns in Space.
+
 ;; A rule is a (Rule Any Pattern Pattern List[Either[Binding,Side-condition]])
 ;; A Rule name is used for guiding allocation.
 
@@ -168,20 +170,25 @@ Allow stores (special)
 ;; A Store-Interation is a combination of
 ;; - read        (10000b)
 ;; - write       (01000b)
-;; - cardinality (00100b)
+;; *** cardinality (00100b) *** REMOVED, since we don't know if we need to read through store.
 ;; - alloc       (00010b)
 ;; - many        (00001b)
 ;; All encoded as a 5 bit number (fixnum)
-(define (reads? n) (fxand n 16))
-(define (writes? n) (fxand n 8))
-(define (cards? n) (fxand n 4))
-(define (allocs? n) (fxand n 2))
-(define (many? n) (fxand n 1))
+(define (reads? n) (fxand n 8)) (define (add-reads n) (fxior n 8))
+(define (writes? n) (fxand n 4)) (define (add-writes n) (fxior n 4))
+(define (allocs? n) (fxand n 2)) (define (add-allocs n) (fxior n 2))
+(define (many? n) (fxand n 1)) (define (add-many n) (fxior n 1))
+(define-values
+  (pure many alloc alloc/many
+   write write/many write/alloc write/alloc/many
+   read read/many read/alloc read/alloc/many
+   read/write read/write/many read/write/alloc read/write/alloc/many)
+  (apply values (range 16)))
 
 (struct expression (store-interaction) #:transparent)
 ;; An Expression is one of
 ;; - (Term Pattern)
-;; - Boolean
+;; - (Boolean Boolean)
 ;; - (Map-lookup Symbol Expression Boolean Expression)
 ;; - (Map-extend Symbol Expression Expression Boolean)
 ;; - (Store-lookup Expression)
@@ -195,12 +202,11 @@ Allow stores (special)
 ;; - (In-Set Expression Expression)
 ;; and the possibly impure
 ;; - (Meta-function-call name Pattern)
-;; - (Store-extend Expression Expression Boolean)
 ;; - (SAlloc Symbol)
 ;; - (MAlloc Symbol)
 ;; - (QSAlloc Symbol _)
 ;; - (QMAlloc Symbol _)
-
+(struct Boolean expression (b) #:transparent)
 (struct Store-extend (key-expr val-expr trust-strong?) #:transparent)
 
 ;; Notes: The boolean in Map-extend is whether the map should remain a strong update through abstraction.

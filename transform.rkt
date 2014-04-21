@@ -67,8 +67,8 @@ FIXMEs:
                 [(or (? Address-Space?) (? External-Space?))
                  (unless (has-vertex? G space) (add-vertex! G space))
                  space]
-                [(User-Space variants trust-recursion?)
-                 (define node (Space-node name trust-recursion?))
+                [(User-Space variants trust-recursion? trust-construction?)
+                 (define node (Space-node name trust-recursion? trust-construction?))
                  (define self-node (Space-ref-node node))
                  (unless (has-vertex? G node)
                    (add-vertex! G node)
@@ -78,7 +78,7 @@ FIXMEs:
 
 (define (add-space-edges! G Space-nodes name space)
   (match space
-    [(User-Space variants-or-components trust-recursion?)
+    [(User-Space variants-or-components trust-recursion? trust-construction?)
      (define node (hash-ref Space-nodes name))
      (for* ([variant-or-component (in-list variants-or-components)]
             [endpoint (in-set (variant-or-component->endpoints name variant-or-component))])
@@ -131,7 +131,7 @@ FIXMEs:
          (hash-set h name imprecise?)]
         [(Address-Space space)
          (hash-set h name #t)]
-        [(User-Space _ trust-recursion?)
+        [(User-Space _ trust-recursion? trust-construction?)
          (hash-set h name (if trust-recursion? #f ∅))])))
 
   ;; Find all recursive addresses and build the first pass of abstract-spaces.
@@ -140,9 +140,9 @@ FIXMEs:
         ([(name space) (in-dict spaces)])
       (match space
         [(or (? External-Space?) (? Address-Space?)) (values rec-addrs abstract-spaces)]
-        [(User-Space variants-or-components trusted?)
+        [(User-Space variants-or-components trust-recursion? trust-construction?)
          (cond
-          [trusted?
+          [trust-recursion?
            ;; All variants are mapped to ∅ to drive later "recursive replacements" to leave
            ;; trusted spaces alone.
            (values
@@ -167,17 +167,16 @@ FIXMEs:
       (search-space-abstract h name)))
   (values abstract-spaces variant-rec-addrs))
 
-;; abstract-language : Language → 
+;; abstract-language : Language →
 ;; (values Language
-;;         Map[Variant-name,Set[Variant-Address]] 
-;;         Map[Space-name,Boolean] 
+;;         Map[Variant-name,Set[Variant-Address]]
+;;         Map[Space-name,Boolean]
 ;;         Variant-name)
 ;;
 ;; Returns (1) a language that cuts all recursion out into addresses,
 ;; (2) a map from variants to positions of self-reference (and mutually-recursive references),
 ;; (3) a map from space names to whether or not they are "abstract,"
 ;; (4) a fresh variant name for packaging up intermediate terms with updated stores.
-;; FIXME: maps with abstract domains need to be specially marked for careful treatment by the semantics.
 ;;        As such, we can make the following concessions:
 ;;        If a space has any abstract map components, there can only be one map component.
 ;;        Otherwise, abstract maps need Variant tagging (XXX: can we do this automatically?) to
@@ -193,7 +192,7 @@ FIXMEs:
   ;; replaced by (Address-Space) when name ∈ S, and the address of the position is added to
   ;; the recursive mention map.
 
-  (match-define (Language lang-name spaces) L)
+  (match-define (Language lang-name spaces refinement-order) L)
   (define recursive-spaces (language-recursive-spaces spaces))
   (define-values (abstract-spaces variant-rec-addrs)
     (language-abstract-spaces-and-recursive-positions spaces recursive-spaces))
@@ -255,7 +254,7 @@ FIXMEs:
            [(or (? External-Space?) (? Address-Space?))
             space]
 
-           [(User-Space variants trust-recursion?)
+           [(User-Space variants trust-recursion? trust-construction?)
             (define abs-variants
               (for/list ([variant (in-list variants)])
                 (replace-recursive-mentions name variant)))
@@ -265,11 +264,11 @@ FIXMEs:
             ;; FIXME: is doing this necessary at all if trust-recursion?
             (if trust-recursion?
                 space
-                (User-Space abs-variants trust-recursion?))]))
+                (User-Space abs-variants trust-recursion? trust-construction?))]))
 
        (hash-set abs-spaces name abs-space)))
 
-   (values (Language lang-name abs-spaces)
+   (values (Language lang-name abs-spaces refinement-order)
            variant-rec-addrs
            abstract-spaces))
 
@@ -281,7 +280,7 @@ FIXMEs:
 ;; Build a map of Variant name to addresses of recursive space references,
 ;; and a map of Space-name to Boolean (abstracted or not?) or a union of spaces of which, if abstract,
 ;; makes the key space abstract. All mutual dependencies are trusted, making the spaces non-abstract.
-(define (find-recursive-mentions recursive-spaces 
+(define (find-recursive-mentions recursive-spaces
                                  current-space
                                  variant-or-component
                                  rec-addrs
@@ -377,14 +376,11 @@ FIXMEs:
 (define (variant-or-component->endpoints name v)
   (match v
     [(Variant name comps)
-     (define len (vector-length comps))
-     (let build ([i 0])
-       (if (= i len)
-           ∅
-           (set-union (build (add1 i))
-                      (for/set ([endpoint (in-set (component->endpoints (unsafe-vector-ref comps i)))])
-                        (match-define (Endpoint addr space) endpoint)
-                        (Endpoint (cons (Variant-field name i) addr) space)))))]
+     (for/fold ([acc ∅]) ([comp (in-vector comps)]
+                          [i (in-naturals)])
+       (for/fold ([acc acc]) ([endpoint (in-set (component->endpoints comp))])
+         (match-define (Endpoint addr space) endpoint)
+         (set-add acc (Endpoint (cons (Variant-field name i) addr) space))))]
     [comp (for/set ([endpoint (in-set (component->endpoints comp))])
             (match-define (Endpoint addr space) endpoint)
             (Endpoint (cons (Space-component name) addr) space))]))
@@ -459,25 +455,22 @@ FIXMEs:
       (match tm
         [(Bvar x _) (error 'abstract-rule "Rule RHS may not bind ~a" tm)]
         [(variant (and v (Variant name _)) pats)
-         (define len (vector-length pats))
-         (define pats* (make-vector len))
          ;; TODO?: error/warn if space defining vname is trusted.
          ;;        Or have second tag trusting construction
+         (define len (vector-length pats))
+         (define pats* (make-vector len))
          (define store-updates
-           (let rewrite-pats ([i 0]
-                              [rev-store-updates '()])
-             (cond
-              [(= i len) (reverse rev-store-updates)]
-              [else
-               (define pat (unsafe-vector-ref pats i))
-               (define vfield (Variant-field name i))
-               (define-values (pat* store-updates*)
-                 (recur name (cons vfield rev-addr)
-                        (list vfield)
-                        pat))
-               (unsafe-vector-set! pats* i pat*)
-               (rewrite-pats (add1 i)
-                             (append (reverse store-updates*) rev-store-updates))])))
+          (reverse
+           (for/fold ([rev-store-updates '()])
+               ([pat (in-vector pats)]
+                [i (in-naturals)])
+             (define vfield (Variant-field name i))
+             (define-values (pat* store-updates*)
+               (recur name (cons vfield rev-addr)
+                      (list vfield)
+                      pat))
+             (unsafe-vector-set! pats* i pat*)
+             (append (reverse store-updates*) rev-store-updates))))
          (values (variant v pats*) store-updates)]
         [other (values other '())])]))
   (recur #f '() '() tm))
@@ -491,7 +484,6 @@ FIXMEs:
     (Meta-function name rules* trusted-implementation/conc #f)]))
 
 ;; abstract-rule
-;; store-name is the Bvar that denotes "the store" in every LHS pattern. There must be one.
 (define (abstract-rule L rec-addrs ΞΔ rule)
   (match-define (Rule rule-name lhs rhs binding-side-conditions) rule)
 
@@ -545,7 +537,7 @@ FIXMEs:
           (bind expr
                 (cons `(When-expr ,i) rev-addr)
                 (λ (w*) (continue (cons (When w*) bindings*))))])])))
-  
+
 ;; Encapsulates a pattern in the following function. If recur on expr
 ;; changes the store, then bind in a let (expresses sequencing), pass the reference to the value.
 (define ((bind* rec-addrs ΞΔ) expr path fn [name #f])
@@ -687,12 +679,12 @@ FIXMEs:
                               (cons `(Set-Add*-val ,i) rev-addr)
                               (λ (v*)
                                  (add*-recur vexprs (add1 i) (cons v* vexprs*))))])))))]
-      
+
      [(In-Set si sexpr vexpr)
       (bind sexpr
             (cons 'In-Set-set rev-addr)
             (λ (s*)
-               (bind vexpr 
+               (bind vexpr
                      (cons 'In-Set-value rev-addr)
                      (λ (v*)
                         (values (In-Set si s* v*) #f)))))]

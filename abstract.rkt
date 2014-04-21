@@ -93,6 +93,7 @@ The abstract semantics differs from the concrete semantics in the following ways
 
   (define (equal-step d₀ d₁)
     (match* (d₀ d₁)
+      ;; We match on name instead of identity due to Variant refinements
       [((variant (Variant name _) ds₀) (variant (Variant name _) ds₁))
        (for/b∧ ([d₀ (in-vector ds₀)]
                 [d₁ (in-vector ds₁)])
@@ -132,7 +133,8 @@ The abstract semantics differs from the concrete semantics in the following ways
       [((discrete-ffun m₀) (discrete-ffun m₁))
        (discrete-ffun-equal? m₀ m₁)]
 
-      ;; OPT-OP: This has no information on discrete abstractions, thus n²logn instead of sometimes nlogn
+      ;; OPT-OP: This has no information on discrete abstractions,
+      ;;         thus n²logn instead of sometimes nlogn
       [((? set? s₀) (? set? s₁))
        (define (⊆? s₀ s₁)
          (for/b∧ ([v (in-set s₀)])
@@ -567,7 +569,7 @@ The abstract semantics differs from the concrete semantics in the following ways
     [(b♯ ρ)
      (slow-eval-bindings ς
       binding-side-conditions ρ store-spaces μ #t
-      (λ (ρ store-spaces μ quality) ;; FIXME: quality??
+      (λ (ρ store-spaces μ quality)
          (when (eq? quality 'b.⊤)
            (log-info
             (format "Possible misfire of rule due to imprecise match ~a ~a ~a"

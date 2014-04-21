@@ -29,7 +29,7 @@
 (define vclo (Variant 'Closure (vector (Space-reference 'Expr) (Space-reference 'Env))))
 ;;; REFINEMENT 
 (define vclov (Variant 'Closure (vector (Space-reference 'Pre-value)
-                                       (Space-reference 'Env))))
+                                        (Space-reference 'Env))))
 (define vkar (Variant 'Ar (vector (Space-reference 'Expr) (Space-reference 'Env))))
 (define vkfn (Variant 'Fn (vector (Space-reference 'Value))))
 (define vmt (Variant 'mt #()))

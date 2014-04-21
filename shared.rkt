@@ -81,7 +81,7 @@ Utility functions and specific functions that are shared between concrete and ab
 ;; in-space? : DPattern Language Space-name → Boolean
 ;; Decide whether a DPattern d is in Space space-name, which is defined in Language L.
 (define (in-space-ref? L space-name d)
-  (match-define (Language lang-name spaces) L)
+  (match-define (Language lang-name spaces _) L)
   (define space
     (hash-ref spaces space-name
               (λ () (error 'in-space? "Undefined space ~a in language ~a"
@@ -100,9 +100,9 @@ Utility functions and specific functions that are shared between concrete and ab
     [_ #f]))
 
 (define (in-space? L space d)
-  (match-define (Language lang-name spaces) L)
+  (match-define (Language lang-name spaces _) L)
   (match space
-    [(User-Space variants-or-components _)
+    [(User-Space variants-or-components _ _)
      (for/or ([var (in-list variants-or-components)])
        (cond [(Variant? var) (in-variant? L var d)]
              [(Space-reference? var) (in-space-ref? (Space-reference-name var) d)]
@@ -143,7 +143,7 @@ Utility functions and specific functions that are shared between concrete and ab
 ;; Any head-position constructor is considered a variant.
 ;; Ensure all variants exist in L.
 (define (sexp-to-dpattern/check sexp expected-space-name L)
-  (match-define (Language name spaces) L)
+  (match-define (Language name spaces _) L)
   (define (component-sexp-to-dpat comp sexp)
     (match comp
       [(℘ comp)
@@ -168,7 +168,7 @@ Utility functions and specific functions that are shared between concrete and ab
     (match space
       [(Address-Space space) (Address-Egal space sexp)] ;; An address may take any form.
       [(External-Space pred _ _ _) (and (pred sexp) sexp)]
-      [(User-Space variants-or-components _)
+      [(User-Space variants-or-components _ _)
        (match sexp
          [`(,(? symbol? head) . ,rest)
           (let/ec break
