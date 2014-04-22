@@ -102,9 +102,11 @@ TODO?: Add binding arrows using DrRacket's API
                    h))
              refinement-order)])
 
-
 (define (choose-best orig-stx order v0 ns0 nl0 v1 ns1 nl1)
-  (error 'choose-best "TODO"))
+  (if
+   (error 'choose-best "TODO: add syntax for refinement ordering, and implement max.")
+   (values v0 ns0 nl0)
+   (values v1 ns1 nl1)))
 
 (define (free-id-table-has-key? t k)
   (not (eq? (free-id-table-ref t k -unmapped) -unmapped)))
@@ -606,6 +608,43 @@ TODO?: Add binding arrows using DrRacket's API
                 [bsc (in-list (attribute bscs.value))]
                 [n (in-list (attribute name))])
        (Rule n l r bsc))]))
+
+(define (parse-meta-function stx)
+  (syntax-parse stx
+    [(_ lang
+        mf-name:id
+        (~do (define langv (syntax-local-value #'lang)))
+        (~or (~optional (~seq #:concrete conc:expr))
+             (~optional (~seq #:abstract abs:expr))) ...
+        [(~var lhs (Pattern langv #f #t (make-immutable-free-id-table)))
+         rhs-raw
+         .
+         (~and (~var bscs (Bindings langv (attribute lhs.new-scope)))
+               (~parse (~var rhs (Pattern langv #f #f (attribute bscs.new-scope)))
+                       #'rhs-raw))]
+        ...)
+     #:fail-unless (implies (null? (attribute lhs)) (and (attribute conc) (attribute abs)))
+     "Must supply rules unless both concrete and abstract implementations are trusted."
+     (with-orig-stx
+      (Meta-function #'mf-name
+                     (for/list ([l (in-list (attribute lhs.value))]
+                                [r (in-list (attribute rhs.value))]
+                                [bsc (in-list (attribute bscs.value))])
+                       (Rule #f l r bsc))
+                     (and (attribute conc) (eval-syntax #'conc))
+                     (and (attribute abs) (eval-syntax #'abs)))
+      (quasitemplate
+       (Meta-function 'mf-name
+                      (list #,@(for/list ([l (in-list (attribute lhs.value))]
+                                          [r (in-list (attribute rhs.value))]
+                                          [bsc (in-list (attribute bscs.value))])
+                                 #`(Rule #f
+                                         #,(with-orig-stx-core l)
+                                         #,(with-orig-stx-core r)
+                                         #,(with-orig-stx-core bsc))))
+                      (?? conc #f)
+                      (?? abs #f)))
+      stx)]))
 
 (flatten-language
  (parse-language
