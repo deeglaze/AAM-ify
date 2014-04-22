@@ -220,6 +220,9 @@ The abstract semantics differs from the concrete semantics in the following ways
       ;; We get a set of results from expr. We expect these results to be sets.
       ;; We want to embody any (all) choices from these sets, so we flatten them into
       ;; a set of possible results.
+      ;; The semantics of choice is makes match-failure /local/ to choices, and not the
+      ;; entire expression. Thus, if we choose from {1,2} and have a condition of even?,
+      ;; we will always continue with 2, instead of consider the entire match to fail given 1.
       [(Choose _ expr)
        (for/fold ([acc ∅]) ([res-set (in-set (inner expr ρ store-spaces μ incoming-quality))])
          (match-define (Abs-Result/effect quality vset store-spaces* μ*) res-set)

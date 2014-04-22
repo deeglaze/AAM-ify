@@ -26,6 +26,7 @@ WISHLIST (! is done):
 + automatic garbage collection in (to add) "weak maps" across address spaces.
   Addresses of different spaces can occur in mapped objects.
 + pattern support for sets and maps (currently we use side-conditions)
++ add a new "binding" form like When, only non-local. Failure leads to trying the next major rule.
 
 FIXMEs:
 - Recursive positions replaced with (Address-Space) are expected to be structurally compared for equality,
