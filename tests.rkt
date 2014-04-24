@@ -36,27 +36,29 @@
 (define vkcons (Variant 'Kcons (vector (Space-reference 'Frame)
                                        (Space-reference 'Kont))))
 (define vstate (Variant 'State (vector (Space-reference 'With-env) (Space-reference 'Kont))))
-(define vspace (User-Space (list vclov) #f))
+(define vspace (User-Space (list vclov) #f #t))
 (define CESK-lang
   (Language
    'LC/CESK
    (hash
     'Variable (External-Space symbol? (λ (e) 1) #f #f)
-    'Env (User-Space (list (Map (Space-reference 'Variable) (Address-Space 'bindings))) #f)
-    'Expr (User-Space (list vref vapp (Space-reference 'Pre-value)) #t)
-    'With-env (User-Space (list vclo) #f)
-    'Pre-value (User-Space (list vlam) #t)
+    'Env (User-Space (list (Map (Space-reference 'Variable) (Address-Space 'bindings))) #f #f)
+    'Expr (User-Space (list vref vapp (Space-reference 'Pre-value)) #t #f)
+    'With-env (User-Space (list vclo) #f #f)
+    'Pre-value (User-Space (list vlam) #t #f)
     'Value vspace
-    'Frame (User-Space (list vkar vkfn) #f)
-    'Kont (User-Space (list vmt vkcons) #f)
-    'States (User-Space (list vstate) #f))))
+    'Frame (User-Space (list vkar vkfn) #f #f)
+    'Kont (User-Space (list vmt vkcons) #f #f)
+    'States (User-Space (list vstate) #f #f))
+   (set (list 'Pre-value 'Expr))))
 
 (define-unit CESK-conc-parms@
   (import)
   (export language-parms^)
   (define alloc gensym)
   (define Ξ #hash()) ;; No meta-functions in simple CESK.
-  (define L CESK-lang))
+  (define L CESK-lang)
+  (define (trace-update state choices τ̂) τ̂))
 
 (define-unit CESK-abs-parms@
   (import)
@@ -65,7 +67,7 @@
     (λ (ς meta-ρ [hint #f])
        (match-define
         (Abs-State (variant (== vstate eq?)
-                            (vector (variant (Variant 'Closure _) (vector e ρ)) κ)) σ μ)
+                            (vector (variant (Variant 'Closure _) (vector e ρ)) κ)) σ μ τ̂)
         ς)
        (match hint
          [`(application ,(Variant-field 'State 1) ,(Variant-field 'Kcons 1))
@@ -77,6 +79,7 @@
           (cons (hash-ref meta-ρ 'x (λ () (error 'alloc "Expected to be called with env containing x ~a" meta-ρ)))
                 hint)]
          [_ (error 'alloc "Bad hint ~a" hint)])))
+  (define (trace-update ς choices τ̂) τ̂)
   (define Ξ #hash())
   (define L CESK-lang))
 
@@ -98,7 +101,8 @@
                                          (Avar 'ρ)))
                    (Avar 'κ)))
          (variant vstate (vector (Rvar 'v) (Rvar 'κ)))
-         (list (Binding (Avar 'v) (Store-lookup #t (Map-lookup #t 'ρ (Term #t (Rvar 'x)) #f #f)))))
+         (list (Binding (Avar 'v) (Store-lookup read (Map-lookup pure 'ρ (Term pure (Rvar 'x)) #f #f))))
+         read)
    (Rule 'application
          (variant vstate
                   (vector
@@ -110,7 +114,8 @@
                           (variant vkcons
                                    (vector (variant vkar (vector (Rvar 'e1) (Rvar 'ρ)))
                                            (Rvar 'κ)))))
-         '())
+         '()
+         pure)
    (Rule 'argument-eval
          (variant vstate
                   (vector (Bvar 'v vspace)
@@ -120,7 +125,8 @@
                   (vector (variant vclo (vector (Rvar 'e) (Rvar 'ρ)))
                           (variant vkcons (vector (variant vkfn (vector (Rvar 'v)))
                                                   (Rvar 'κ)))))
-         '())
+         '()
+         pure)
    (Rule 'function-eval
          (variant vstate
                   (vector (Bvar 'v vspace)
@@ -133,9 +139,10 @@
          (variant vstate
                   (vector (variant vclo (vector (Rvar 'e) (Rvar 'ρ*)))
                           (Rvar 'κ)))
-         (list (Binding (Avar 'a) (MAlloc #f 'bindings))
-               (Binding (Avar 'ρ*) (Map-extend #t 'ρ (Term #t (Rvar 'x)) (Term #t (Rvar 'a)) #f))
-               (Store-extend (Term #t (Rvar 'a)) (Term #t (Rvar 'v)) #f)))))
+         (list (Binding (Avar 'a) (MAlloc allocs 'bindings))
+               (Binding (Avar 'ρ*) (Map-extend pure 'ρ (Term pure (Rvar 'x)) (Term pure (Rvar 'a)) #f))
+               (Store-extend (Term pure (Rvar 'a)) (Term pure (Rvar 'v)) #f))
+         write/alloc)))
 
 (define-values (abs-lang rec-addrs abstract-spaces)
   (abstract-language CESK-lang))
@@ -159,7 +166,8 @@
 (define (inject L e)
   (define term (sexp-to-dpattern/check e 'Expr L))
   (mk-Abs-State (variant vstate (vector (variant vclo (vector term #hash()))
-                                        (variant vmt #())))))
+                                        (variant vmt #())))
+                '()))
 (define (run L expr)
   ((c/apply-reduction-relation* CESK-reduction) (inject L expr)))
 (define (a/run L expr)
@@ -168,7 +176,7 @@
  (log-thread 'info)
  (for/list ([out (in-set (a/run CESK-lang '(App (Lam x (Ref x))
                                               (Lam y (Ref y)))))])
-   (match-define (Abs-State tm store-spaces μ) out)
-   (printf "(Abs-State ~a ~a ~a)~%" (dpattern->sexp tm) store-spaces μ)
+   (match-define (Abs-State tm store-spaces μ τ̂) out)
+   (printf "(Abs-State ~a ~a ~a ~a)~%" (dpattern->sexp tm) store-spaces μ τ̂)
    out))
 (sleep 1)

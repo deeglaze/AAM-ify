@@ -71,8 +71,8 @@ Allow stores (special)
 ;; Create an initial state
 (define (mk-State tm) (State tm #hash()))
 
-(struct Abs-State (term σ μ) #:transparent)
-(define (mk-Abs-State tm) (Abs-State tm #hash() #hash()))
+(struct Abs-State (term σ μ τ̂) #:transparent)
+(define (mk-Abs-State tm τ̂₀) (Abs-State tm #hash() #hash() τ̂₀))
 
 ;; A Precision-Classifier is one of
 ;; - 'concrete [and thus discrete]
@@ -112,10 +112,10 @@ Allow stores (special)
 ;; A reduction semantics is a (Reduction-Relation Space List[Rule])
 ;; where every rule's lhs and rhs are patterns in Space.
 
-;; A rule is a (Rule Any Pattern Pattern List[Either[Binding,Side-condition]])
+;; A rule is a (Rule Any Pattern Pattern List[Either[Binding,Side-condition]] Store-Interaction)
 ;; A Rule name is used for guiding allocation.
 
-(struct Rule (name lhs rhs binding-side-conditions) #:transparent)
+(struct Rule (name lhs rhs binding-side-conditions store-interaction) #:transparent)
 
 ;; A Pattern is one of
 ;; - a (Bvar Symbol Option[Space-name])
@@ -151,6 +151,10 @@ Allow stores (special)
 ;; - an (Address-Egal _)
 ;; - a Set[DPattern]
 
+;; An Abs-Data is an (Abs-Data Set[DPattern])
+(struct Abs-Data (data) #:transparent)
+(struct Choice (label data) #:transparent)
+
 (struct Binding (lhs rexpr) #:transparent)
 (struct When (expr) #:transparent)
 ;; Make a syntactic distinction between allocations that expect to have 
@@ -179,7 +183,7 @@ Allow stores (special)
 (define (allocs? n) (fxand n 2)) (define (add-allocs n) (fxior n 2))
 (define (many? n) (fxand n 1)) (define (add-many n) (fxior n 1))
 (define-values
-  (pure many alloc alloc/many
+  (pure many allocs alloc/many
    write write/many write/alloc write/alloc/many
    read read/many read/alloc read/alloc/many
    read/write read/write/many read/write/alloc read/write/alloc/many)
@@ -234,7 +238,8 @@ Allow stores (special)
 (struct Unsafe-store-ref expression (space) #:transparent)
 
 ;; If expecting a set, make an arbitrary choice.
-(struct Choose expression (expr) #:transparent)
+;; Labelled to distinguish different answers when evaluating expressions.
+(struct Choose expression (label expr) #:transparent)
 
 (struct SAlloc expression (space) #:transparent)
 (struct MAlloc expression (space) #:transparent)
@@ -246,12 +251,11 @@ Allow stores (special)
 ;; When expressions have these side-effects, we wrap the contents in the following.
 (define-syntax Result/effect (make-rename-transformer #'State))
 
-;; We attach a quality of a result to qualify if it follows from cumulatively
+;; We attach a certainty of a result to qualify if it follows from cumulatively
 ;; strong or weak side-conditions in Let or top-level forms.
-;; Implicit side-effects include weak store/map lookups
-;; Non-determinism resulting from abstraction is different since evaluation is
-;; considered "successful," even if approximate.
-(struct Abs-Result/effect (quality term store-spaces μ) #:transparent)
+;; certain? is #t if the result can be /reached/ concretely,
+;; even if the result may be abstract.
+(struct Abs-Result/effect (certain? term store-spaces μ) #:transparent)
 
 ;; the definition of a meta-function is like a reduction semantics,
 ;; but treated like a functional relation.
@@ -264,9 +268,10 @@ Allow stores (special)
 ;; Further, we allow custom implementations of a meta-function if the specifier wishes for more control.
 
 ;; A Meta-function is a
-;; (Meta-function Symbol List[Rule] Option[DPattern → DPattern] Option[DPattern → ℘(DPattern)])
+;; (Meta-function Symbol List[Rule] Store-Interaction Option[DPattern → DPattern] Option[DPattern → ℘(DPattern)])
+;; The store-interaction is a summary of all the rules' store-interactions.
 ;; TODO: termination back-door?
-(struct Meta-function (name rules trusted-implementation/conc trusted-implementation/abs) #:transparent)
+(struct Meta-function (name rules store-interaction trusted-implementation/conc trusted-implementation/abs) #:transparent)
 
 ;; A unique value to distinguish lookup failures.
 (struct Unmapped ()) (define -unmapped (Unmapped))

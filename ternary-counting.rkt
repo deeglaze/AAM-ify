@@ -5,7 +5,7 @@
 (provide ;; Abstract counting algebra
          μ+ μmax μ⊔ c+ cmax c⊑
          ;; Ternary logic algebra
-         b∨ b∧ b¬ bδ ⦃b⦄
+         b∨ b∧ b¬ bδ ⦃b⦄ q∧
          for/bδ for*/bδ
          for/b∧ for*/b∧
          for/b∨ for*/b∨
@@ -60,6 +60,10 @@
      [#f #f]
      ['b.⊤ (and (no-dup) 'b.⊤)]
      [_ (error 'b∧ "Bad boolean♯ ~a" b₀)])))
+
+;; When b is not 'b.⊤, the certainty is unchanged.
+(define (q∧ q b)
+  (and (boolean? b) q))
 
 (define (b¬ b) (if (eq? b 'b.⊤) 'b.⊤ (not b)))
 

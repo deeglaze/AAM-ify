@@ -366,7 +366,7 @@ TODO?: Add binding arrows using DrRacket's API
 
 (define-syntax (--> stx) (raise-syntax-error #f "For use in Rule form" stx))
 
-(define-syntax-class (Expression L bound-vars)
+(define-syntax-class (Expression L bound-vars Ξ)
   #:attributes (value)
   #:literal-sets (expr-ids)
   #:local-conventions ([t (Pattern L #f #f bound-vars)]
@@ -440,8 +440,8 @@ TODO?: Add binding arrows using DrRacket's API
                                #,(with-orig-stx-core (attribute t-e.value))
                                #,(with-orig-stx-core (attribute e-e.value)))
                          #'orig-stx))
-  (pattern (~and orig-stx (Let (~var bscs (Bindings L bound-vars))
-                               (~var body (Expression L (attribute bscs.new-scope)))))
+  (pattern (~and orig-stx (Let (~var bscs (Bindings L bound-vars Ξ))
+                               (~var body (Expression L (attribute bscs.new-scope) Ξ))))
            #:do [(define tag (fxior (attribute bscs.interaction)
                                     (expression-store-interaction (attribute body.value))))]
            #:attr value
@@ -532,12 +532,19 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr value (with-orig-stx
                          (Unsafe-store-ref pure (syntax-e #'space))
                          #`(Unsafe-store-ref #,pure 'space)
+                         #'orig-stx))
+  (pattern (~and orig-stx (mf:id t))
+           #:fail-unless (free-id-table-has-key? Ξ #'mf)
+           (format "Meta-function not in scope ~a" (syntax-e #'mf))
+           #:attr value (with-orig-stx
+                         (Meta-function-call #'mf (attribute t.value))
+                         #`(Meta-function-call)
                          #'orig-stx)))
 
-(define-syntax-class (BSC L bound-vars)
+(define-syntax-class (BSC L bound-vars Ξ)
   #:attributes (value new-scope interaction)
   #:literals (where when update)
-  #:local-conventions ([#rx".*-e$" (Expression L bound-vars)])
+  #:local-conventions ([#rx".*-e$" (Expression L bound-vars Ξ)])
   (pattern (~and orig-stx (where (~var p (Pattern L #f #t bound-vars))
                                  let-e))
            #:attr value
@@ -573,14 +580,14 @@ TODO?: Add binding arrows using DrRacket's API
            (add-writes (fxior (expression-store-interaction (attribute k-e.value))
                               (expression-store-interaction (attribute v-e.value))))))
 
-(define-syntax-class (Bindings L bound-vars)
+(define-syntax-class (Bindings L bound-vars Ξ)
   #:attributes (new-scope value interaction)
   (pattern (~and orig-stx ()) #:attr new-scope bound-vars
            #:attr value (with-orig-stx '() #'() #'orig-stx)
            #:attr interaction pure)
   (pattern (~and orig-stx
-                 ((~var bsc (BSC L bound-vars)) .
-                  (~var bscs (Bindings L (attribute bsc.new-scope)))))
+                 ((~var bsc (BSC L bound-vars Ξ)) .
+                  (~var bscs (Bindings L (attribute bsc.new-scope) Ξ))))
            #:attr value
            (with-orig-stx (cons (attribute bsc.value) (attribute bscs.value))
                           (cons (with-orig-stx-core (attribute bsc.value))
@@ -590,7 +597,7 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr interaction (fxior (attribute bsc.interaction)
                                      (attribute bscs.interaction))))
 
-(define (parse-rules stx)
+(define (parse-rules stx Ξ)
   (syntax-parse stx
     #:literals (-->)
     [(_ lang
@@ -599,49 +606,84 @@ TODO?: Add binding arrows using DrRacket's API
              (~var lhs (Pattern langv #f #t (make-immutable-free-id-table)))
              rhs-raw
              .
-             (~and (~var bscs (Bindings langv (attribute lhs.new-scope)))
+             (~and (~var bscs (Bindings langv (attribute lhs.new-scope) Ξ))
                    (~parse (~var rhs (Pattern langv #f #f (attribute bscs.new-scope)))
                            #'rhs-raw))]
         ...)
      (for/list ([l (in-list (attribute lhs.value))]
                 [r (in-list (attribute rhs.value))]
                 [bsc (in-list (attribute bscs.value))]
-                [n (in-list (attribute name))])
-       (Rule n l r bsc))]))
+                [n (in-list (attribute name))]
+                [si (in-list (attribute bscs.interaction))])
+       (Rule n l r bsc si))]))
 
-(define (parse-meta-function stx)
+;; Set up the environment that says which meta-functions are in scope.
+(define (parse-meta-functions stx)
   (syntax-parse stx
-    [(_ lang
-        mf-name:id
-        (~do (define langv (syntax-local-value #'lang)))
+    [(_ L (~and mfs (mf-name:id . rest)) ...)
+     #:do [(define langv (syntax-local-value #'lang))]
+     #:fail-unless langv "Language not supplied."
+     (define Ξ (make-free-id-table))
+     (for ([name (in-list (attribute mf-name))])
+       (free-id-table-set! Ξ name #t))
+     (for/fold ([t (make-immutable-free-id-table)])
+         ([name (in-list (attribute mf-name))]
+          [mf (in-list (attribute mfs))])
+       (free-id-table-set t name (parse-meta-function mf Ξ langv)))]))
+
+(define (parse-meta-function stx Ξ L)
+  (syntax-parse stx
+    [(_ mf-name:id
+        (~optional lang)
+        (~do (define langv (or L (and (attribute lang) (syntax-local-value #'lang)))))
+        (~fail-unless langv "Language not supplied.")
         (~or (~optional (~seq #:concrete conc:expr))
-             (~optional (~seq #:abstract abs:expr))) ...
+             (~optional (~seq #:abstract abs:expr (~or (~optional (~and #:reads tr-reads))
+                                                       (~optional (~and #:writes tr-writes))
+                                                       (~optional (~and #:allocs tr-allocs))
+                                                       (~optional (~and #:many tr-many))) ...))) ...
         [(~var lhs (Pattern langv #f #t (make-immutable-free-id-table)))
          rhs-raw
          .
-         (~and (~var bscs (Bindings langv (attribute lhs.new-scope)))
+         (~and (~var bscs (Bindings langv (attribute lhs.new-scope) Ξ))
                (~parse (~var rhs (Pattern langv #f #f (attribute bscs.new-scope)))
                        #'rhs-raw))]
         ...)
      #:fail-unless (implies (null? (attribute lhs)) (and (attribute conc) (attribute abs)))
      "Must supply rules unless both concrete and abstract implementations are trusted."
+     (define-values (rev-rules si)
+       (for/fold ([rev-rules '()] [overall-si pure])
+           ([l (in-list (attribute lhs.value))]
+            [r (in-list (attribute rhs.value))]
+            [bsc (in-list (attribute bscs.value))]
+            [si (in-list (attribute bscs.interaction))])
+         (values (cons (Rule #f l r bsc si) rev-rules) (fxior si overall-si))))
      (with-orig-stx
       (Meta-function #'mf-name
-                     (for/list ([l (in-list (attribute lhs.value))]
-                                [r (in-list (attribute rhs.value))]
-                                [bsc (in-list (attribute bscs.value))])
-                       (Rule #f l r bsc))
+                     (reverse rev-rules)
+                     ;; collect up the store interactions given by the syntax.
+                     (if (attribute abs)
+                         (for/fold ([si pure]) ([syn (in-list (list (attribute tr-reads)
+                                                                    (attribute tr-writes)
+                                                                    (attribute tr-allocs)
+                                                                    (attribute tr-many)))]
+                                                [quality (in-list (list read write alloc many))])
+                           (if syn (fxior si quality) syn))
+                         si)
                      (and (attribute conc) (eval-syntax #'conc))
                      (and (attribute abs) (eval-syntax #'abs)))
       (quasitemplate
        (Meta-function 'mf-name
                       (list #,@(for/list ([l (in-list (attribute lhs.value))]
                                           [r (in-list (attribute rhs.value))]
-                                          [bsc (in-list (attribute bscs.value))])
+                                          [bsc (in-list (attribute bscs.value))]
+                                          [si (in-list (attribute bscs.interaction))])
                                  #`(Rule #f
                                          #,(with-orig-stx-core l)
                                          #,(with-orig-stx-core r)
-                                         #,(with-orig-stx-core bsc))))
+                                         #,(with-orig-stx-core bsc)
+                                         #,si)))
+                      #,si
                       (?? conc #f)
                       (?? abs #f)))
       stx)]))

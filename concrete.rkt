@@ -170,7 +170,7 @@ in the spaces.rkt format.
     ;; We get a set of results from expr. We expect these results to be sets.
     ;; We want to embody any (all) choices from these sets, so we flatten them into
     ;; a set of possible results.
-    [(Choose _ expr)
+    [(Choose _ _ expr)
      (for/fold ([acc ∅]) ([res (in-set (expression-eval expr ρ store-spaces))])
        (match-define (Result/effect some-set store-spaces*) res)
        (for/fold ([acc acc]) ([v (in-set some-set)])
@@ -213,7 +213,7 @@ in the spaces.rkt format.
 ;; rule-eval : Rule Map[Symbol,DPattern] DPattern Map[Symbol,Meta-function] → ℘(DPattern)
 ;; Evaluate a rule on some concrete term and return possible RHSs.
 (define (internal-rule-eval store-spaces rule d)
-  (match-define (Rule name lhs rhs binding-side-conditions) rule)
+  (match-define (Rule name lhs rhs binding-side-conditions _) rule)
   (match (c/match lhs d ρ₀ store-spaces)
     [#f ∅]
     [ρ
@@ -228,7 +228,7 @@ in the spaces.rkt format.
 ;; TODO?: Add ability to do safety checks on input/output belonging to a
 ;;        specified Space.
 (define (mf-eval store-spaces mf argd)
-  (match-define (Meta-function name rules trust/conc _) mf)
+  (match-define (Meta-function name rules _ trust/conc _) mf)
   (if trust/conc
       (trust/conc store-spaces argd)
       ;; Use the first rule that matches. Puns State as Result/effect.

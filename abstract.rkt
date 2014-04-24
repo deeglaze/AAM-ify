@@ -38,6 +38,55 @@ The abstract semantics differs from the concrete semantics in the following ways
       [(? set? vs) (for/or ([v (in-set vs)]) (aliased? v))]
       [atom #f])))
 
+(define (term-⊔ v₀ v₁)
+  (match* (v₀ v₁)
+    [(v v) v]
+    [((Abs-Data payload₀) (Abs-Data payload₁))
+     (Abs-Data (set-union payload₀ payload₁))]
+    [((Abs-Data payload) v)
+     (Abs-Data (set-add payload v))]
+    [(v (Abs-Data payload))
+     (Abs-Data (set-add payload v))]))
+
+(define (in-data v)
+  (match v
+    [(Abs-Data S) (in-set S)]
+    [singleton (in-value singleton)]))
+
+(define absb.⊤ (Abs-Data (⦃b⦄ 'b.⊤)))
+(define (to-data v)
+  (if (eq? v 'b.⊤)
+      absb.⊤
+      v))
+
+;; An answer is a map from a list of choices to a Abs-Result/effect.
+(define answer⊥ #hash())
+(define (answer-⊔ ans₀ ans₁)
+  (if (eq? ans₀ ans₁)
+      ans₀
+      (for/fold ([ans ans₀]) ([(choice res) (in-hash ans₁)])
+        (match (hash-ref ans₀ choice -unmapped)
+          [(== -unmapped eq?)
+           (hash-set ans choice res)]
+          [res* (hash-set ans choice (result-⊔ res res*))]))))
+
+(define (answer-⊔1 ans choice res)
+  (match (hash-ref ans choice -unmapped)
+    [(== -unmapped eq?) (hash-set ans choice res)]
+    [res* (hash-set ans choice (result-⊔ res* res))]))
+
+(define/match (result-⊔ res₀ res₁)
+  [((Abs-Result/effect certain?₀ v₀ σ₀ μ₀) (Abs-Result/effect certain?₁ v₁ σ₁ μ₁))
+   (Abs-Result/effect (and certain?₀ certain?₁) (term-⊔ v₀ v₁)
+                      (store-space-⊔ σ₀ σ₁) (μ⊔ μ₀ μ₁))])
+
+;; XXX: Plug in custom ⊔ here.
+(define (store-space-⊔ σ₀ σ₁)
+  (if (eq? σ₀ σ₁)
+      σ₀
+      (for/fold ([σ σ₀]) ([(space store) (in-hash σ₁)])
+        (hash-set σ space (hash-join store (hash-ref σ₀ space #hash()))))))
+
 (define-unit abstract-semantics@
   (import language-parms^)
   (export language-impl^)
@@ -169,7 +218,7 @@ The abstract semantics differs from the concrete semantics in the following ways
   (a/equal? d₀ d₁))
 
 (define (a/match pattern data ρ store-spaces μ)
-  ;; inner returns the quality of the match and the updated map.
+  ;; inner returns the certainty of the match and the updated map.
   (define (inner pattern data ρ)
     (match* (pattern data)
       [((Bvar x Space) d)
@@ -203,161 +252,191 @@ The abstract semantics differs from the concrete semantics in the following ways
   (inner pattern data ρ))
 (trace a/match)
 
-;; Evaluation is marked with a "quality" to determine if the results follow a side-condition or pattern-match
+;; Evaluation is marked with a "certain?" to determine if the results follow a side-condition or pattern-match
 ;; that "may" fail. This qualification is to reuse evaluation for the semantics of meta-functions,
 ;; which use the "first" rule that matches. When a rule "may" match, we have to try the next one to be safe.
 ;; If a rule exactly matches, we can stop.
-;; A failed map lookup is simply stuck; it does not affect the quality of a match.
+;; A failed map lookup is simply stuck; it does not affect the certainty of a match.
 
-;; incoming-quality is for when e is evaluated following another expression's evaluation.
-;; The quality will be at least the quality of the previous expression's.
-(define (slow-expression-eval ς e ρ store-spaces μ incoming-quality)
-  (let inner ([e e] [ρ ρ] [store-spaces store-spaces] [μ μ] [incoming-quality incoming-quality])
+;; incoming-certain? is for when e is evaluated following another expression's evaluation.
+(define (slow-expression-eval ς e ρ store-spaces μ incoming-choices incoming-certain?)
+  (let inner ([e e] [ρ ρ] [store-spaces store-spaces] [μ μ]
+              [choices incoming-choices] [certain? incoming-certain?])
     (match e
 ;;; Always pure expressions
-      [(Empty-set _) (set (Abs-Result/effect incoming-quality ∅ store-spaces μ))]
+      [(Empty-set _) (hash choices (Abs-Result/effect certain? ∅ store-spaces μ))]
 
+      ;; ASSUMPTION: pat has been pre-transformed so that recursive constructions
+      ;; are routed through the store(s)
+      [(Term _ pat)
+       (hash choices (Abs-Result/effect certain? (pattern-eval pat ρ) store-spaces μ))]
+
+;;; Always reads? expressions
+      ;; reads? is true
+      [(Store-lookup _ kexpr)
+       (for/hash ([(choice kres) (in-hash (inner kexpr ρ store-spaces μ choices certain?))])
+         (match-define (Abs-Result/effect kcertain? kv store-spaces* μ*) kres)
+         (values choice (Abs-Result/effect kcertain? (store-ref store-spaces kv) store-spaces* μ*)))]
+
+;;; allocs? is true
+      ;; XXX: Should unqualified alloc forms be allowed?
+      [(SAlloc _ space)
+       (define addr (alloc ς ρ))
+       (hash choices (Abs-Result/effect certain?
+                                    (Address-Structural space addr)
+                                    store-spaces
+                                    (μ+ μ addr 1)))]
+      [(QSAlloc _ space hint)
+       (define addr (alloc ς ρ hint))
+       (hash choices (Abs-Result/effect certain?
+                                    (Address-Structural space addr)
+                                    store-spaces
+                                    (μ+ μ addr 1)))]
+      [(MAlloc _ space)
+       (define addr (alloc ς ρ))
+       (hash choices (Abs-Result/effect certain?
+                                    (Address-Egal space addr)
+                                    store-spaces
+                                    (μ+ μ addr 1)))]
+      [(QMAlloc _ space hint)
+       (define addr (alloc ς ρ hint))
+       (hash choices (Abs-Result/effect certain?
+                                        (Address-Egal space addr)
+                                        store-spaces
+                                        (μ+ μ addr 1)))]
+
+;;; Depend on others
       ;; We get a set of results from expr. We expect these results to be sets.
       ;; We want to embody any (all) choices from these sets, so we flatten them into
       ;; a set of possible results.
       ;; The semantics of choice is makes match-failure /local/ to choices, and not the
       ;; entire expression. Thus, if we choose from {1,2} and have a condition of even?,
       ;; we will always continue with 2, instead of consider the entire match to fail given 1.
-      [(Choose _ expr)
-       (for/fold ([acc ∅]) ([res-set (in-set (inner expr ρ store-spaces μ incoming-quality))])
-         (match-define (Abs-Result/effect quality vset store-spaces* μ*) res-set)
+      [(Choose _ label expr)
+       (for/fold ([acc answer⊥])
+           ([(choice res-set) (in-hash (inner expr ρ store-spaces μ choices certain?))])
+         (match-define (Abs-Result/effect rcertain? vset store-spaces* μ*) res-set)
          (cond
           [(set? vset)
            (for/fold ([acc acc]) ([v (in-set vset)])
-             (set-add acc (Abs-Result/effect quality v store-spaces* μ*)))]
+             (hash-set acc
+                       (cons (Choice label v) choice)
+                       (Abs-Result/effect rcertain? v store-spaces* μ*)))]
           [else
            (log-info (format "May have chosen from non-set ~a" vset))
            acc]))]
 
-      ;; ASSUMPTION: pat has been pre-transformed so that recursive constructions
-      ;; are routed through the store(s)
-      [(Term _ pat) (set (Abs-Result/effect incoming-quality (pattern-eval pat ρ) store-spaces μ))]
-
-;;; Always reads? expressions
-      ;; reads? is true
-      [(Store-lookup _ kexpr)
-       (for/set ([kres (in-set (inner kexpr ρ store-spaces μ incoming-quality))])
-         (match-define (Abs-Result/effect quality kv store-spaces* μ*) kres)
-         (Abs-Result/effect quality (store-ref store-spaces kv) store-spaces* μ*))]
-
-;;; allocs? is true
-      ;; XXX: Should unqualified alloc forms be allowed?
-      [(SAlloc _ space)
-       (define addr (alloc ς ρ))
-       (set (Abs-Result/effect incoming-quality
-                               (Address-Structural space addr)
-                               store-spaces
-                               (μ+ μ addr 1)))]
-      [(QSAlloc _ space hint)
-       (define addr (alloc ς ρ hint))
-       (set (Abs-Result/effect incoming-quality
-                               (Address-Structural space addr)
-                               store-spaces
-                               (μ+ μ addr 1)))]
-      [(MAlloc _ space)
-       (define addr (alloc ς ρ))
-       (set (Abs-Result/effect incoming-quality
-                               (Address-Egal space addr)
-                               store-spaces
-                               (μ+ μ addr 1)))]
-      [(QMAlloc _ space hint)
-       (define addr (alloc ς ρ hint))
-       (set (Abs-Result/effect incoming-quality
-                               (Address-Egal space addr)
-                               store-spaces
-                               (μ+ μ addr 1)))]
-
-;;; Depend on others
       ;; cards? true
       [(Equal _ l r)
-       (for/fold ([acc ∅]) ([lres (in-set (inner l ρ store-spaces μ incoming-quality))])
-         (match-define (Abs-Result/effect quality lv store-spaces* μ*) lres)
-         (for/fold ([acc acc]) ([rres (in-set (inner r ρ store-spaces* μ* quality))])
-           (match-define (Abs-Result/effect rquality rv store-spaces** μ**) rres)
-           (for/fold ([acc acc]) ([b (in-set (⦃b⦄ (a/equal? lv rv store-spaces** μ**)))])
-             (Abs-Result/effect rquality b store-spaces** μ**))))]
+       (for/fold ([acc answer⊥])
+           ([(lchoice lres) (in-hash (inner l ρ store-spaces μ choices certain?))])
+         (match-define (Abs-Result/effect lcertain? lv store-spaces* μ*) lres)
+         (for/fold ([acc acc]) ([(rchoice rres)
+                                 (in-hash (inner r ρ store-spaces* μ* lchoice lcertain?))])
+           (match-define (Abs-Result/effect rcertain? rv store-spaces** μ**) rres)
+           (define equalv (a/equal? lv rv store-spaces** μ**))
+           (hash-set acc rchoice
+                     (Abs-Result/effect rcertain? (to-data equalv)
+                                        store-spaces** μ**))))]
 
       ;; depending of mf analysis, the interaction can be anything
       [(Meta-function-call _ f arg)
        ;; meta-functions also have non-deterministic choice.
-       (mf-eval ς
-                store-spaces
-                (hash-ref Ξ f (λ () (error "Unknown meta-function ~a" f)))
-                (pattern-eval arg ρ)
-                μ)]
+       (for/hash ([(choice res)
+                   (in-hash
+                    (mf-eval ς
+                             store-spaces
+                             (hash-ref Ξ f (λ () (error "Unknown meta-function ~a" f)))
+                             (pattern-eval arg ρ)
+                             μ))])
+         (values (append choice choices) res))]
       
       [(Map-lookup _ m kexpr default? dexpr)
-       (define ks (inner kexpr ρ store-spaces μ incoming-quality))
+       (define ks (inner kexpr ρ store-spaces μ choices certain?))
        (define do-default
          (if default?
-             (λ (store-spaces μ outgoing-quality [if-bad #f])
-                (inner dexpr ρ store-spaces μ outgoing-quality))
-             (λ (store-spaces μ outgoing-quality [if-bad #f])
+             (λ (store-spaces μ outgoing-choices outgoing-certain? [if-bad #f])
+                (inner dexpr ρ store-spaces μ outgoing-choices outgoing-certain?))
+             (λ (store-spaces μ outgoing-choices outgoing-certain? [if-bad #f])
                 (when (procedure? if-bad) (if-bad))
-                ∅)))
+                answer⊥)))
        (match (hash-ref ρ m (unbound-map-error 'map-ref m))
          [(abstract-ffun map)
           (define-values (res found?)
-            (for/fold ([res ∅]) ([kres (in-set ks)])
-              (match-define (Abs-Result/effect quality k store-spaces* μ*) kres)
+            (for/fold ([res answer⊥]) ([(choice kres) (in-set ks)])
+              (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
               (define-values (res* found?)
-                (for/fold ([res res] [found? #f])
-                    ([(k* v) (in-dict map)])
+                (for*/fold ([choice-res -unmapped] [found? #f])
+                    ([k (in-data k)]
+                     [(k* v) (in-dict map)])
                   (match (a/equal? k k* store-spaces* μ*)
-                    [#f (values res found?)]
-                    [#t (values (set-add res (Abs-Result/effect quality v store-spaces* μ*))
-                                #t)]
+                    [#f (values choice-res found?)]
+                    [#t
+                     (define res (Abs-Result/effect kcertain? v store-spaces* μ*))
+                     (values (if (eq? choice-res -unmapped)
+                                 res
+                                 (result-⊔ choice-res res))
+                             #t)]
                     ['b.⊤
+                     (define res (Abs-Result/effect kcertain? v store-spaces* μ*))
+                     ;; TODO?: Log entry
                      (values
-                      ;; XXX: emit log entry detailing possible miss?
-                      (set-add res (Abs-Result/effect quality v store-spaces* μ*))
+                      (if (eq? choice-res -unmapped)
+                          res
+                          (result-⊔ choice-res res))
                       (b∨ found? 'b.⊤))])))
               (match found?
-                [#t res*]
-                [_ (set-union res* (do-default store-spaces* μ* quality))])))
+                [#t (hash-set res choice res*)]
+                [_
+                 (answer-⊔
+                  (hash-set res choice res*)
+                  (do-default store-spaces* μ* choice certain?))])))
           res]
          [(discrete-ffun map)
-          (for/fold ([res ∅]) ([kres (in-set ks)])
-            (match-define (Abs-Result/effect quality k store-spaces* μ*) kres)
-            (match (hash-ref map k -unmapped)
-              [(== -unmapped eq?)
-               (do-default
-                store-spaces* μ*
-                quality
-                (λ () (log-info (format "map-ref: Key unmapped in map ~a: ~a" m k))))]
-              [v (cond
-                  [(∣γ∣>1 k μ)
-                   (log-info (format "map-ref: Key may not be present in map ~a: ~a" m k))
-                   ;; XXX: emit log entry detailing possible miss?
-                   (set-union (set-add res (Abs-Result/effect quality v store-spaces* μ*))
-                              (do-default store-spaces* μ* quality))]
-                  [else (set-add res (Abs-Result/effect quality v store-spaces* μ*))])]))]
+          (for/fold ([res answer⊥]) ([(choice kres) (in-hash ks)])
+            (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
+            (for/fold ([res res]) ([k (in-data k)])
+              (match (hash-ref map k -unmapped)
+                [(== -unmapped eq?)
+                 (answer-⊔
+                  res
+                  (do-default
+                   store-spaces* μ*
+                   choice
+                   certain?
+                   (λ () (log-info (format "map-ref: Key unmapped in map ~a: ~a" m k)))))]
+                [v (cond
+                    [(∣γ∣>1 k μ)
+                     (log-info (format "map-ref: Key may not be present in map ~a: ~a" m k))
+                     ;; XXX: emit log entry detailing possible miss?
+                     (answer-⊔
+                      (hash-set res choice (Abs-Result/effect kcertain? v store-spaces* μ*))
+                      (do-default store-spaces* μ* choice certain?))]
+                    [else (answer-⊔1 res choice (Abs-Result/effect kcertain? v store-spaces* μ*))])])))]
          [(? dict? map) ;; concrete domain map. Do same as concrete semantics.
-          (for/fold ([res ∅]) ([kres (in-set ks)])
-            (match-define (Abs-Result/effect quality k store-spaces* μ*) kres)
-            (match (hash-ref map k -unmapped)
-              [(== -unmapped eq?)
-               (set-union res
-                          (do-default store-spaces* μ* quality
-                                      (λ () (log-info (format "Key unmapped in map ~a: ~a" m k)))))]
-              [v (set-add res (Abs-Result/effect quality v store-spaces* μ*))]))]
+          (for/fold ([res answer⊥]) ([(choice kres) (in-hash ks)])
+            (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
+            (for/fold ([res res]) ([k (in-data k)])
+             (match (hash-ref map k -unmapped)
+               [(== -unmapped eq?)
+                (answer-⊔
+                 res
+                 (do-default store-spaces* μ* choice kcertain?
+                             (λ () (log-info (format "Key unmapped in map ~a: ~a" m k)))))]
+               [v (answer-⊔1 res choice (Abs-Result/effect kcertain? v store-spaces* μ*))])))]
          [other (error 'map-lookup "Bad map ~a" other)])]
 
       ;; XXX: needs special threading
       [(Map-extend _ m kexpr vexpr trust-strong?)
-       (define ks (inner kexpr ρ store-spaces μ incoming-quality))
-       (define setter (if trust-strong? (λ (h k v) (hash-set h k (set v))) hash-add))
+       (define ks (inner kexpr ρ store-spaces μ choices certain?))
+       (define setter (if trust-strong? strong-update-with-data weak-update-with-data))
        (match (hash-ref ρ m (unbound-map-error 'map-ext m))
          [(abstract-ffun map)
-          (for/fold ([acc ∅]) ([kres (in-set ks)])
-            (match-define (Abs-Result/effect kquality k store-spaces* μ*) kres)
-            (for/fold ([acc acc]) ([vres (in-set (inner vexpr ρ store-spaces* μ* kquality))])
-              (match-define (Abs-Result/effect vquality v store-spaces** μ**) vres)
+          (for/fold ([acc answer⊥]) ([(kchoice kres) (in-hash ks)])
+            (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
+            (for/fold ([acc acc]) ([(vchoice vres)
+                                    (in-hash (inner vexpr ρ store-spaces* μ* kchoice kcertain?))])
+              (match-define (Abs-Result/effect vcertain? v store-spaces** μ**) vres)
               ;; TODO: This explosion of nastiness is begging for a plug-in widening.
               ;; this may be the form of abstract-ffun having an (optional) extra function
               ;; that takes 〈map,trust-strong?, ks, vs, store-spaces, μ〉 and produces a set of maps
@@ -367,217 +446,270 @@ The abstract semantics differs from the concrete semantics in the following ways
               ;; Strongly present keys are in all possible maps. The rest have an exponential blowup.
               ;; OPT: we cut out the intermediate step and build the base map with strongly present keys.
               (define-values (base-map weakly)
-                (for/fold ([base-map map] [weakly ∅]) ([k* (in-dict-keys map)])
+                (for*/fold ([base-map map] [weakly ∅]) ([k (in-data k)]
+                                                        [k* (in-dict-keys map)])
                   (match (a/equal? k k* store-spaces μ)
                     [#t (values (setter base-map v) weakly)]
                     [#f (values base-map weakly)]
                     ['b.⊤ (values base-map (set-add weakly k*))])))
               ;; Each key adds to possible maps
-              (set-union acc
-                         (for*/fold ([maps (set (Abs-Result/effect vquality base-map store-spaces** μ**))])
-                             ([k* (in-set weakly)]
-                              [map (in-set maps)])
-                           (set-add maps
-                                    (Abs-Result/effect vquality
-                                                       (setter (Abs-Result/effect-term map) k* v)
-                                                       store-spaces** μ**))))))]
+              (answer-⊔1
+               acc
+               vchoice
+               (Abs-Result/effect vcertain?
+                (Abs-Data
+                 (for*/fold ([maps (set base-map)])
+                     ([k* (in-set weakly)]
+                      [map (in-set maps)])
+                   (set-add maps (setter (Abs-Result/effect-term map) k* v))))
+                store-spaces** μ**))))]
          [(discrete-ffun map)
           ;; ASSUMPTION: abstract finite functions have a ℘ co-domain,
           ;; and values extended are elements of the set, not the type of the co-domain itself.
           ;; This should be weakened for better customizability in the future.
           ;; TODO?: allow non-determinism in vexpr to be absorbed into the abstract co-domain as a widening.
-          (for/fold ([acc ∅]) ([kres (in-set ks)])
-            (match-define (Abs-Result/effect kquality k store-spaces* μ*) kres)
-            (for/fold ([acc acc]) ([vres (in-set (inner vexpr ρ store-spaces* μ* kquality))])
-              (match-define (Abs-Result/effect vquality v store-spaces** μ**) vres)
-              (set-add acc (Abs-Result/effect vquality (setter map k v) store-spaces** μ**))))]
+          (for/fold ([acc answer⊥]) ([(kchoice kres) (in-hash ks)])
+            (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
+            (for*/fold ([acc acc]) ([(vchoice vres)
+                                     (in-hash (inner vexpr ρ store-spaces* μ* kchoice kcertain?))]
+                                    [k (in-data k)])
+              (match-define (Abs-Result/effect vcertain? v store-spaces** μ**) vres)
+              (answer-⊔1 acc vchoice (Abs-Result/effect vcertain? (setter map k v) store-spaces** μ**))))]
          [(? dict? map)
-          (for/fold ([acc ∅]) ([kres (in-set ks)])
-            (match-define (Abs-Result/effect kquality k store-spaces* μ*) kres)
-            (for/fold ([acc acc]) ([vres (in-set (inner vexpr ρ store-spaces* μ* kquality))])
-              (match-define (Abs-Result/effect vquality v store-spaces** μ**) vres)
-              (set-add acc (Abs-Result/effect vquality (hash-set map k v) store-spaces** μ**))))]
+          (for/fold ([acc answer⊥]) ([(kchoice kres) (in-hash ks)])
+            (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
+            (for*/fold ([acc acc]) ([(vchoice vres)
+                                     (in-hash (inner vexpr ρ store-spaces* μ* kchoice kcertain?))]
+                                    [k (in-data k)])
+              (match-define (Abs-Result/effect vcertain? v store-spaces** μ**) vres)
+              (match v
+                [(Abs-Data S)
+                 (Abs-Result/effect vcertain? (Abs-Data (for/set ([v (in-set S)])
+                                                          (hash-set map k v)))
+                                    store-spaces** μ**)]
+                [v
+                 (answer-⊔1 acc vchoice
+                          (Abs-Result/effect vcertain? (hash-set map k v) store-spaces** μ**))])))]
          [other (error 'map-extend "Bad map? ~a" other)])]
 
-      ;; XXX: needs special threading
       [(If _ g t e)
-       (for/fold ([acc ∅]) ([gres (in-set (inner g ρ store-spaces μ incoming-quality))])
-         (match-define (Abs-Result/effect gquality g store-spaces* μ*) gres)
-         (set-union acc
-                    (if g
-                        (inner t ρ store-spaces* μ* gquality)
-                        (inner e ρ store-spaces* μ* gquality))))]
-
+       ;; NOTE: Like When, the uncertainty of g only matters if it evaluates to different values.
+       ;; If cert
+       (define gress (inner g ρ store-spaces μ choices certain?))
+       (for/fold ([acc answer⊥]) ([(gchoice gres) (in-set gress)])
+         (match-define (Abs-Result/effect gcertain? g store-spaces* μ*) gres)
+         (define (then) (inner t ρ store-spaces* μ* gchoice gcertain?))
+         (define (else) (inner e ρ store-spaces* μ* gchoice gcertain?))
+         (answer-⊔1 acc
+                  gchoice
+                  (match g
+                    [(Boolean _ b) (if b (then) (else))]
+                    [(Abs-Data data)
+                     (if (set-member? data #f)
+                         (if (= (set-count data) 1)
+                             (else)
+                             (answer-⊔ (then) (else)))
+                         (then))]
+                    ;; Everything else truish.
+                    [_ (then)])))]
+      
       ;; Really match-let
       [(Let _ bindings bexpr)
-       (slow-eval-bindings
-        ς bindings ρ store-spaces μ incoming-quality
-        (λ (ρ store-spaces μ quality)
-           (inner bexpr ρ store-spaces μ quality)))]
+       (expr-eval-bindings
+        ς bindings ρ store-spaces μ choices certain?
+        (λ (ρ store-spaces μ choices certain?)
+           (inner bexpr ρ store-spaces μ choices certain?)))]
 
       [(In-Dom _ m kexpr)
-       (define ks (inner kexpr ρ store-spaces μ incoming-quality))
+       (define ks (inner kexpr ρ store-spaces μ choices certain?))
        (match (hash-ref ρ m (unbound-map-error 'map-ext m))
          [(abstract-ffun map)
-          (for/fold ([acc ∅]) ([kres (in-set ks)])
-            (match-define (Abs-Result/effect kquality k store-spaces* μ*) kres)
-            (for/fold ([acc acc])
-                ([b (in-set (⦃b⦄
-                             (for*/b∨ ([k* (in-dict-keys map)])
-                                      (a/equal? k k* store-spaces* μ*))))])
-              (set-add acc (Abs-Result/effect kquality b store-spaces* μ*))))]
+          (for/hash ([(kchoice kres) (in-hash ks)])
+            (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
+            (define domv
+              (for/bδ ([k (in-data k)])
+                      (for/b∨ ([k* (in-dict-keys map)])
+                              (a/equal? k k* store-spaces* μ*))))
+            (values kchoice (Abs-Result/effect kcertain?
+                                               (to-data domv)
+                                               store-spaces* μ*)))]
          [(discrete-ffun map)
-          (for/fold ([acc ∅]) ([kres (in-set ks)])
-            (match-define (Abs-Result/effect kquality k store-spaces* μ*) kres)
-            (for/fold ([acc acc])
-                ([b (in-set (⦃b⦄
-                             (b∧ (dict-has-key? map k)
-                                 (implies (∣γ∣>1 k μ) 'b.⊤))))])
-              (set-add acc (Abs-Result/effect kquality b store-spaces* μ*))))]
+          (for/hash ([(kchoice kres) (in-hash ks)])
+            (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
+            (define domv
+              (for/bδ ([k (in-data k)])
+                      (b∧ (dict-has-key? map k)
+                          (implies (∣γ∣>1 k μ) 'b.⊤))))
+            (values kchoice (Abs-Result/effect kcertain? (to-data domv) store-spaces* μ*)))]
          [(? dict? map)
-          (for/set ([kres (in-set ks)])
-            (match-define (Abs-Result/effect kquality kv store-spaces* μ*) kres)
-            (Abs-Result/effect kquality (dict-has-key? map kv) store-spaces* μ*))]
+          (for/hash ([(kchoice kres) (in-hash ks)])
+            (match-define (Abs-Result/effect kcertain? kv store-spaces* μ*) kres)
+            (values kchoice (Abs-Result/effect kcertain? (for/bδ ([k (in-data kv)])
+                                                            (dict-has-key? map kv))
+                                               store-spaces* μ*)))]
          [other (error 'slow-expression-eval "Bad map? ~a" other)])]
 
       [(Set-Union _ exprs)
        (define logged (mutable-set))
-       (let ev-all ([quality incoming-quality]
+       (let ev-all ([choices choices]
+                    [certain? certain?]
                     [exprs exprs]
                     [cur-set ∅]
                     [store-spaces store-spaces]
                     [μ μ])
          (match exprs
-           ['() (set (Abs-Result/effect quality cur-set store-spaces μ))]
+           ['() (hash choices (Abs-Result/effect certain? cur-set store-spaces μ))]
            [(cons expr exprs)
-            (for/fold ([results ∅])
-                ([res (in-set (inner expr ρ store-spaces μ quality))])
-              (match-define (Abs-Result/effect vquality v store-spaces* μ*) res)
-              (cond 
-               [(set? v)
-                (set-union results
-                           (ev-all vquality
-                                   exprs (set-union cur-set v) store-spaces* μ*))]
-               [else
-                (unless (set-member? logged v)
-                  (log-info (format "Cannot union non-set ~a" v))
-                  (set-add! logged v))
-                results]))]
+            (for/fold ([results answer⊥])
+                ([(rchoice res) (in-hash (inner expr ρ store-spaces μ choices certain?))])
+              (match-define (Abs-Result/effect vcertain? v store-spaces* μ*) res)
+              (for/fold ([results results]) ([v (in-data v)])
+                (cond 
+                 [(set? v)
+                  (answer-⊔
+                   results
+                   (ev-all rchoice vcertain?
+                           exprs (set-union cur-set v) store-spaces* μ*))]
+                 [else
+                  (unless (set-member? logged v)
+                    (log-info (format "Cannot union non-set ~a" v))
+                    (set-add! logged v))
+                  results])))]
            [_ (error 'set-union "bad exprs ~a" exprs)]))]
 
       [(Set-Add* _ set-expr exprs)
-       (for/fold ([results ∅])
-           ([setres (in-set (inner set-expr ρ store-spaces μ incoming-quality))])
-         (match-define (Abs-Result/effect squality setv store-spaces* μ*) setres)
-         (cond
-          [(set? setv)
-           (let ev-all ([quality squality]
-                        [exprs exprs]
-                        [cur-set setv]
-                        [store-spaces store-spaces*]
-                        [μ μ*])
-             (match exprs
-               ['() (set (Abs-Result/effect quality cur-set store-spaces μ))]
-               [(cons expr exprs)
-                (for/fold ([results results])
-                    ([res (in-set (inner expr ρ store-spaces μ quality))])
-                  (match-define (Abs-Result/effect vquality v store-spaces* μ*) res)
-                  (set-union results
-                             (ev-all vquality exprs (set-add cur-set v) store-spaces* μ*)))]
-               [_ (error 'set-add* "Bad exprs ~a" exprs)]))]
-          [else
-           (log-info (format "Cannot add to non-set ~a" setv))
-           results]))]
+       (for/fold ([results answer⊥])
+           ([(schoice setres) (in-hash (inner set-expr ρ store-spaces μ choices certain?))])
+         (match-define (Abs-Result/effect scertain? setv store-spaces* μ*) setres)
+         (for/fold ([results results]) ([setv (in-data setv)])
+           (cond
+            [(set? setv)
+             (let ev-all ([choices schoice]
+                          [certain? scertain?]
+                          [exprs exprs]
+                          [cur-set setv]
+                          [store-spaces store-spaces*]
+                          [μ μ*])
+               (match exprs
+                 ['() (hash choices (Abs-Result/effect certain? cur-set store-spaces μ))]
+                 [(cons expr exprs)
+                  (for/fold ([results results])
+                      ([(echoice res) (in-hash (inner expr ρ store-spaces μ choices certain?))])
+                    (match-define (Abs-Result/effect vcertain? v store-spaces* μ*) res)
+                    (for/fold ([results results]) ([v (in-data v)])
+                      (answer-⊔ results
+                                (ev-all echoice vcertain? exprs
+                                        (set-add cur-set v)
+                                        store-spaces* μ*))))]
+                 [_ (error 'set-add* "Bad exprs ~a" exprs)]))]
+            [else
+             (log-info (format "Cannot add to non-set ~a" setv))
+             results])))]
 
       ;; OPT-OP: if we know what abstractions a set contains (e.g. all discrete),
       ;; we can use set-member? instead of linear search.
       [(In-Set _ set-expr expr)
-       (for/fold ([results ∅])
-           ([setres (in-set (inner set-expr ρ store-spaces μ incoming-quality))])
-         (match-define (Abs-Result/effect squality setv store-spaces* μ*) setres)
-         (cond
-          [(set? setv)
-           (for/fold ([results results])
-               ([vres (in-set (inner expr ρ store-spaces* μ* squality))])
-             (match-define (Abs-Result/effect vquality v store-spaces** μ**) vres)
+       (for/fold ([results answer⊥])
+           ([(schoice setres) (in-hash (inner set-expr ρ store-spaces μ choices certain?))])
+         (match-define (Abs-Result/effect scertain? setv store-spaces* μ*) setres)
+         (for/fold ([results results]) ([setv (in-data setv)])
+           (cond
+            [(set? setv)
              (for/fold ([results results])
-                 ([b (in-set (⦃b⦄ (for/b∨ ([sv (in-set setv)])
-                                          (a/equal? sv v store-spaces** μ**))))])
-               (set-add results
-                        (Abs-Result/effect vquality b store-spaces** μ**))))]
-          [else
-           (log-info (format "In-Set given non-set ~a" setv))
-           results]))]
+                 ([(vchoice vres) (in-hash (inner expr ρ store-spaces* μ* schoice scertain?))])
+               (match-define (Abs-Result/effect vcertain? v store-spaces** μ**) vres)
+               (for/fold ([results results]) ([v (in-data v)])
+                 (define equalv
+                   (for/b∨ ([sv (in-set setv)])
+                           (a/equal? sv v store-spaces** μ**)))
+                 (answer-⊔1 results vchoice
+                          (Abs-Result/effect vcertain? (to-data equalv) store-spaces** μ**))))]
+            [else
+             (log-info (format "In-Set given non-set ~a" setv))
+             results])))]
 
-      [(? boolean? b) (set (Abs-Result/effect incoming-quality b store-spaces μ))]
+      [(Boolean _ b) (hash choices (Abs-Result/effect certain? b store-spaces μ))]
 
       [bad (error 'expr-eval "Bad expression ~a" bad)])))
 (trace slow-expression-eval)
 
 ;; Binding/Store-extend/When are side-effecting statements (local/global/control).
 ;; They are available at the top level and in Let expressions.
-;; Returns set of results and Boolean (#t iff there is a b.⊤ quality result).
-(define (slow-eval-bindings ς bindings ρ store-spaces μ incoming-quality kont)
-  (let proc-bindings ([quality incoming-quality] [bindings bindings] [ρ ρ] [store-spaces store-spaces] [μ μ])
-    (match bindings
-      ['() (kont ρ store-spaces μ quality)]
-      [(cons binding bindings)
-       (match binding
-         [(Binding pat cexpr)
-          (for/fold ([acc ∅])
-              ([cvres (in-set (slow-expression-eval ς cexpr ρ store-spaces μ quality))])
-            (match-define (Abs-Result/effect cquality cv store-spaces* μ*) cvres)
-            (match/values (a/match pat cv ρ store-spaces* μ)
-              [(#f _) acc]
-              [(#t ρ*)
-               (set-union acc (proc-bindings cquality bindings ρ* store-spaces* μ*))]
-              [('b.⊤ ρ*)
-               (log-info (format "Possible failed match in let ~a ~a" binding cv))
-               (set-union acc (proc-bindings 'b.⊤ bindings ρ* store-spaces* μ*))]
-              [(b♯ _) (error 'proc-bindings "Bad boolean♯ ~a" b♯)]))]
+;; Returns set of results and Boolean (#t iff there is a b.⊤ certain? result).
+(define-syntax-rule (mk-slow-eval-bindings name out⊥ combine)
+  (define (name ς bindings ρ store-spaces μ incoming-choices incoming-certain? kont)
+    (let proc-bindings ([choices incoming-choices] [certain? incoming-certain?]
+                        [bindings bindings] [ρ ρ] [store-spaces store-spaces] [μ μ])
+      (match bindings
+        ['() (kont ρ store-spaces μ choices certain?)]
+        [(cons binding bindings)
+         (match binding
+           [(Binding pat cexpr)
+            (for/fold ([acc out⊥])
+                ([(cchoice cvres)
+                  (in-hash (slow-expression-eval ς cexpr ρ store-spaces μ choices certain?))])
+              (match-define (Abs-Result/effect ccertain? cv store-spaces* μ*) cvres)
+              (for/fold ([acc acc]) ([cv (in-data cv)])
+                (match/values (a/match pat cv ρ store-spaces* μ)
+                  [(#f _) acc]
+                  [(#t ρ*)
+                   (combine acc (proc-bindings cchoice ccertain? bindings ρ* store-spaces* μ*))]
+                  [('b.⊤ ρ*)
+                   (log-info (format "Possible failed match in let ~a ~a" binding cv))
+                   (combine acc (proc-bindings cchoice 'b.⊤ bindings ρ* store-spaces* μ*))]
+                  [(b♯ _) (error 'proc-bindings "Bad boolean♯ ~a" b♯)])))]
 ;;; Always writes?
-         ;; TODO: allow approximation that stores evaluation of val-expr directly into store.
-         [(Store-extend key-expr val-expr trust-strong?)
-          ;; TODO?: make trust-strong? 3 valued. Trust/strong-when-safe/monotonic.
-          ;; We use cardinality analysis to determine safety of strong updates.
-          (define setter (if trust-strong?
-                             (λ (store-spaces k v) (store-set store-spaces k (set v)))
-                             store-add))
-          (for/fold ([results ∅])
-              ([kres (in-set (slow-expression-eval ς key-expr ρ store-spaces μ quality))])
-            (match-define (Abs-Result/effect kquality k store-spaces* μ*) kres)
-            (for/fold ([results results])
-                ([vres (in-set (slow-expression-eval ς val-expr ρ store-spaces* μ* kquality))])
-              (match-define (Abs-Result/effect vquality v store-spaces** μ**) vres)
-              (set-union results
-                         (proc-bindings vquality bindings ρ (setter store-spaces** k v) μ**))))]
-         [(When expr)
-          (for/fold ([results ∅])
-              ([vres (in-set (slow-expression-eval ς expr ρ store-spaces μ quality))])
-            (match-define (Abs-Result/effect vquality v store-spaces* μ*) vres)
-            (cond
-             [v
-              (set-union results
-                         ;; XXX: The one place that the quality can change
-                         (proc-bindings (b∧ vquality v) bindings ρ store-spaces* μ*))]
-             [else results]))]
-         [_ (error 'proc-bindings "Bad binding ~a" binding)])]
-      [_ (error 'proc-bindings "Bad bindings ~a" bindings)])))
+           ;; TODO: allow approximation that stores evaluation of val-expr directly into store.
+           [(Store-extend key-expr val-expr trust-strong?)
+            ;; TODO?: make trust-strong? 3 valued. Trust/strong-when-safe/monotonic.
+            ;; We use cardinality analysis to determine safety of strong updates.
+            (define setter (if trust-strong? store-set store-add))
+            (for/fold ([results out⊥])
+                ([(kchoice kres)
+                  (in-hash (slow-expression-eval ς key-expr ρ store-spaces μ choices certain?))])
+              (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
+              (for*/fold ([results results])
+                  ([(vchoice vres)
+                    (in-hash (slow-expression-eval ς val-expr ρ store-spaces* μ* kchoice kcertain?))]
+                   [k (in-data k)])
+                (match-define (Abs-Result/effect vcertain? v store-spaces** μ**) vres)
+                (combine results
+                         (proc-bindings vchoice vcertain? bindings ρ (setter store-spaces** k v) μ**))))]
+           [(When expr)
+            (define condres (slow-expression-eval ς expr ρ store-spaces μ choices certain?))
+            (for/fold ([results out⊥]) ([(vchoice vres) (in-hash condres)])
+              (match-define (Abs-Result/effect vcertain? v store-spaces* μ*) vres)
+              (define (pass certain?)
+                (proc-bindings vchoice certain? bindings ρ store-spaces* μ*))
+              (match v
+                [(Abs-Data S)
+                 (if (set-member? S #f)
+                     (if (= (set-count S) 1)
+                         results
+                         (combine results (pass 'b.⊤)))
+                     ;; No #f possible here, so we're as certain as before.
+                     (combine results (pass certain?)))]
+                [#f results]
+                [truish (combine results (pass certain?))]))]
+           [_ (error 'proc-bindings "Bad binding ~a" binding)])]
+        [_ (error 'proc-bindings "Bad bindings ~a" bindings)]))))
+(mk-slow-eval-bindings expr-eval-bindings answer⊥ answer-⊔)
+(mk-slow-eval-bindings set-eval-bindings ∅ set-union)
 
 (define (slow-rule-eval rule ς)
-  (match-define (Rule name lhs rhs binding-side-conditions) rule)
-  (match-define (Abs-State d store-spaces μ) ς)
+  (match-define (Rule name lhs rhs binding-side-conditions store-interaction) rule)
+  (match-define (Abs-State d store-spaces μ τ̂) ς)
   (match/values (a/match lhs d ρ₀ store-spaces μ)
     [(#f _) ∅]
     [(b♯ ρ)
-     (slow-eval-bindings ς
-      binding-side-conditions ρ store-spaces μ #t
-      (λ (ρ store-spaces μ quality)
-         (when (eq? quality 'b.⊤)
+     (set-eval-bindings ς
+      binding-side-conditions ρ store-spaces μ '() #t
+      (λ (ρ store-spaces μ choices certain?)
+         (unless certain?
            (log-info
-            (format "Possible misfire of rule due to imprecise match ~a ~a ~a"
-                    rule rhs ρ)))
-         (set (Abs-State (pattern-eval rhs ρ) store-spaces μ))))]))
+            (format "Possible misfire of rule due to imprecise match Rule: ~a Env: ~a Choices: ~a"
+                    rule ρ choices)))
+         (set (Abs-State (pattern-eval rhs ρ) store-spaces μ (trace-update ς choices τ̂)))))]))
 
 #|
 To run mutually-recursively but as a fixed-point computation, we need a 
@@ -593,41 +725,41 @@ TODO: mf's given a "trust recursion" tag to not do this space-intensive memoizat
 ;; Hasheq[Meta-function,Hash[(List State Store-Spaces Abs-Count DPattern),Set[Abs-Result/effect]]
 (define mf-memo (make-parameter #f))
 (define (slow-meta-function-eval ς store-spaces mf argd μ)
-  (match-define (Meta-function name rules _ trusted-implementation/abs) mf)
+  (match-define (Meta-function name rules _ _ trusted-implementation/abs) mf)
   (define (do-mf-eval table)
     (define mf-table (hash-ref! table mf make-hash))
     (define key (list ς store-spaces μ argd))
     (match (hash-ref mf-table key -unmapped)
       [#f ;; infinite loop. Reached same key.
-       (hash-set! mf-table key ∅)
-       ∅]
+       (hash-set! mf-table key answer⊥)
+       answer⊥]
       [(== -unmapped eq?)
        (hash-set! mf-table key #f)
        (define results
-         (let try-rules ([rules rules] [results ∅])
+         (let try-rules ([rules rules] [results answer⊥])
            (match rules
              ['() results]
-             [(cons (and rule (Rule name lhs rhs binding-side-conditions)) rules)
+             [(cons (and rule (Rule name lhs rhs binding-side-conditions store-interaction)) rules)
               (match/values (a/match lhs argd ρ₀ store-spaces μ)
                 [(#f _) (try-rules rules results)]
                 [(b♯ ρ)
-                 (slow-eval-bindings
+                 (expr-eval-bindings
                   ς
-                  binding-side-conditions ρ store-spaces μ b♯
-                  (λ (ρ store-spaces μ quality)
+                  binding-side-conditions ρ store-spaces μ '() b♯
+                  (λ (ρ store-spaces μ choices certain?)
                      (define results*
-                       (set-add results
+                       (answer-⊔1 results choices
                                 ;; Quality is #t since meta-functions' evaluation does not affect
                                 ;; the matching of a rule.
                                 (Abs-Result/effect #t (pattern-eval rhs ρ) store-spaces μ)))
                      (cond 
-                      [(eq? quality 'b.⊤)
+                      ;; True match; we can stop searching through rules.
+                      [certain? results*]
+                      [else
                        (log-info
                         (format "Possible misfire of meta-function rule due to imprecise match ~a ~a ~a"
                                 rule rhs ρ))
-                       (try-rules rules results*)]
-                      ;; True match; we can stop searching through rules.
-                      [else results*])))])])))
+                       (try-rules rules results*)])))])])))
        (hash-set! mf-table key results)
        results]
       [results results]))

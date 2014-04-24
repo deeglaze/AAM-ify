@@ -13,7 +13,8 @@ Utility functions and specific functions that are shared between concrete and ab
          apply-reduction-relation
          apply-reduction-relation*
          apply-reduction-relation*/memo
-         store-ref store-set store-add
+         apply-reduction-relation*/∇
+         store-ref store-set store-add weak-update-with-data strong-update-with-data
          in-space? in-variant? in-component?
          hash-join
          hash-add
@@ -30,7 +31,7 @@ Utility functions and specific functions that are shared between concrete and ab
   (L ;; Language
    alloc ;; State Map[Symbol,DPattern] [Any] → Any
    Ξ ;; Map[Symbol,Meta-function]
-   ))
+   trace-update))
 ;; A Store-Space is a Map[Address-Space-Name,Map[Any,DPattern]]
 ;; An Abs-Count is a Map[Any,Card]
 (define-signature language-impl^
@@ -77,6 +78,29 @@ Utility functions and specific functions that are shared between concrete and ab
          (match (reduce term)
            [(? set-empty?) (set term)]
            [outs (for/union ([term* (in-set outs)]) (fix term*))])]))))
+
+(define (apply-reduction-relation*/∇ ⊔ rule-eval rules)
+  (define reduce (apply-reduction-relation rule-eval rules))
+  (λ (term)
+     (define seen (make-hash))
+     (define (seen-add! s)
+       (define τ̂ (Abs-State-τ̂ s))
+       (match (hash-ref seen τ̂ -unmapped)
+         [(== -unmapped eq?)
+          (hash-set! seen τ̂ s)
+          s]
+         [s-old
+          (define-values (s* changed?) (⊔ s s-old))
+          (cond [changed?
+                 (hash-set! seen τ̂ s*)
+                 s*]
+                [else #f])]))
+     (let fix ([term term])
+       (for* ([term* (in-set (reduce term))]
+              [term♯ (in-value (seen-add! term*))]
+              #:when term♯)
+         (fix term♯)))
+     seen))
 
 ;; in-space? : DPattern Language Space-name → Boolean
 ;; Decide whether a DPattern d is in Space space-name, which is defined in Language L.
@@ -252,5 +276,15 @@ Utility functions and specific functions that are shared between concrete and ab
                   (op (hash-ref store-spaces space #hash()) addr v))]
        [_ (error who "Bad address ~a" k)])))
 
-(define store-set (store-op 'store-set hash-set))
-(define store-add (store-op 'store-add hash-add))
+(define (strong-update-with-data m k v)
+  (match v
+    [(Abs-Data S) (hash-set m k S)]
+    [singleton (hash-set m k (set singleton))]))
+
+(define (weak-update-with-data m k v)
+  (match v
+    [(Abs-Data S) (hash-join m k S)]
+    [singleton (hash-add m k singleton)]))
+
+(define store-set (store-op 'store-set strong-update-with-data))
+(define store-add (store-op 'store-add weak-update-with-data))

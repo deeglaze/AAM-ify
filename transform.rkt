@@ -40,6 +40,7 @@ FIXMEs:
 (require graph
          racket/unsafe/ops
          racket/trace
+         racket/fixnum
          "spaces.rkt"
          "shared.rkt")
 (provide abstract-language abstract-rule
@@ -55,7 +56,7 @@ FIXMEs:
 
 ;; An Endpoint is an (Endpoint Variant-Address Space-Name)
 (struct Endpoint (address space) #:transparent)
-(struct Space-node (name trust) #:transparent)
+(struct Space-node (name trust-rec trust-con) #:transparent)
 ;; distinguish space from reference to identify recursive spaces
 (struct Space-ref-node (sn) #:transparent)
 
@@ -114,11 +115,15 @@ FIXMEs:
         (for/set ([c (in-list cc)] #:when (Space-ref-node? c)) (Space-ref-node-sn c)))
       (define space-names
         (for/set ([space (in-set spaces)]) (Space-node-name space)))
-      (define-values (h* dummy)
-       (for/fold ([h h] [trust 'unspecified]) ([space (in-set spaces)])
-         (define ctrust (Space-node-trust space))
-         (cond [(or (eq? trust 'unspecified) (equal? trust ctrust))
-                (values (hash-set h (Space-node-name space) space-names) ctrust)]
+      (define-values (h* dummy0 dummy1)
+       (for/fold ([h h] [trust-rec 'unspecified] [trust-con 'unspecified])
+           ([space (in-set spaces)])
+         (match-define (Space-node _ ctrust-rec ctrust-con) space)
+         (cond [(and (or (eq? trust-rec 'unspecified) (equal? trust-rec ctrust-rec))
+                     (or (eq? trust-con 'unspecified) (equal? trust-con ctrust-con)))
+                (values (hash-set h (Space-node-name space) space-names)
+                        ctrust-rec
+                        ctrust-con)]
                [else
                 (error 'bad-trust "Recursive spaces have mismatched recursion trust ~a" cc)])))
       h*))
@@ -396,10 +401,12 @@ FIXMEs:
   (if (variant? pat)
       (let-values ([(pat* binding-scs) (flatten-pattern rec-addrs pat '() #f)])
         (values (Bvar new-bvar (Address-Space 'AAM))
-                (cons (Binding pat* (Choose #t (Store-lookup #t (Term #t (Rvar new-bvar)))))
+                (cons (Binding pat* (Choose read/many (gensym)
+                                            (Store-lookup read (Term pure (Rvar new-bvar)))))
                       binding-scs)))
       (values (Bvar new-bvar (Address-Space 'AAM))
-              (list (Binding pat (Choose #t (Store-lookup #t (Term #t (Rvar new-bvar)))))))))
+              (list (Binding pat (Choose read/many (gensym)
+                                         (Store-lookup read (Term pure (Rvar new-bvar)))))))))
 
 ;; flatten-pattern : Pattern Option[Set[List[Component-Address]]] → (values Pattern List[Binding-side-conditions])
 (define (flatten-pattern rec-addrs pat rev-addr [rec-positions #f])
@@ -448,9 +455,9 @@ FIXMEs:
       (values (Rvar address-var)
               (append store-updates
                       (list (Binding (Avar address-var)
-                                     (QSAlloc #f 'AAM (cons alloc-tag (reverse rev-addr))))
-                            (Store-extend (Term #t (Rvar address-var))
-                                          (Term #t pat*)
+                                     (QSAlloc allocs 'AAM (cons alloc-tag (reverse rev-addr))))
+                            (Store-extend (Term pure (Rvar address-var))
+                                          (Term pure pat*)
                                           #f))))]
      [else
       (match tm
@@ -477,16 +484,18 @@ FIXMEs:
   (recur #f '() '() tm))
 
 (define (abstract-meta-function L rec-addrs ΞΔ mf)
-  (match-define (Meta-function name rules trusted-implementation/conc trusted-implementation/abs) mf)
+  (match-define (Meta-function name rules si trusted-implementation/conc trusted-implementation/abs) mf)
   (cond
    [trusted-implementation/abs mf]
    [else
     (define rules* (for/list ([rule (in-list rules)]) (abstract-rule L rec-addrs ΞΔ rule)))
-    (Meta-function name rules* trusted-implementation/conc #f)]))
+    (define si (for/fold ([si pure]) ([rule (in-list rules*)])
+                 (fxior si (Rule-store-interaction rule))))
+    (Meta-function name rules* si trusted-implementation/conc #f)]))
 
 ;; abstract-rule
 (define (abstract-rule L rec-addrs ΞΔ rule)
-  (match-define (Rule rule-name lhs rhs binding-side-conditions) rule)
+  (match-define (Rule rule-name lhs rhs binding-side-conditions si) rule)
 
   ;; Now we rewrite the LHS to non-deterministically choose values when it
   ;; pattern matches on recursive positions.
@@ -506,9 +515,25 @@ FIXMEs:
   (define-values (rhs* store-updates)
     (check-and-rewrite-term rec-addrs rule-name rhs))
 
-  (Rule rule-name lhs* rhs* (append lhs-binding-side-conditions
-                                    binding-side-conditions*
-                                    store-updates)))
+  (define bscs* (append lhs-binding-side-conditions
+                        binding-side-conditions*
+                        store-updates))
+  (define si*
+    (for/fold ([si pure]) ([bsc (in-list bscs*)])
+      (match bsc
+        [(Store-extend k v _)
+         (define ksi (expression-store-interaction k))
+         (define vsi (expression-store-interaction v))
+         (unless (and (fixnum? ksi) (fixnum? vsi))
+           (error 'abstract-rule "Bad ~a ~a ~a ~a" rule-name bsc ksi vsi))
+         (fxior si (add-writes (fxior ksi vsi)))]
+        [(or (When e)
+             (Binding _ e))
+         (define esi (expression-store-interaction e))
+         (unless (fixnum? esi)
+           (error 'abstract-rule "Bad ~a ~a ~a" rule-name bsc esi))
+         (fxior si esi)])))
+  (Rule rule-name lhs* rhs* bscs* si*))
 
 (define (abstract-bindings rec-addrs ΞΔ rev-addr bscs kont)
   (define bind (bind* rec-addrs ΞΔ))
@@ -546,7 +571,7 @@ FIXMEs:
   (cond
    [Δ?
     (define var (if name (gensym name) (gensym 'intermediate)))
-    (define-values (r dummy) (fn (Term #t (Rvar var))))
+    (define-values (r dummy) (fn (Term pure (Rvar var))))
     (values (Let (list (Binding (Avar var) e*)) r) #t)]
    [else (fn e*)]))
 
@@ -559,6 +584,7 @@ FIXMEs:
 (define (abstract-expression rec-addrs ΞΔ alloc-tag expr)
   (abstract-expression* rec-addrs ΞΔ expr (list alloc-tag)))
 
+;; FIXME: the output store-interactions are wrong.
 (define (abstract-expression* rec-addrs ΞΔ expr rev-addr)
   (define bind (bind* rec-addrs ΞΔ))
   (let recur ([expr expr] [rev-addr rev-addr])
@@ -569,14 +595,14 @@ FIXMEs:
         (check-and-rewrite-term rec-addrs (reverse rev-addr) pattern))
       ;; If no store updates, then no new store.
       (cond
-       [(empty? store-updates) (values (Term #t pat*) #f)]
-       [else (values (Let #f store-updates (Term #t pat*)) #t)])]
+       [(empty? store-updates) (values (Term pure pat*) #f)]
+       [else (values (Let #f store-updates (Term pure pat*)) #t)])]
 
      [(Store-lookup si kexpr)
       (bind kexpr
             (cons 'SL-key rev-addr)
             (λ (k*)
-               (values (Choose si (Store-lookup si k*)) #f))
+               (values (Choose si (gensym) (Store-lookup si k*)) #f))
             'key)]
 
      ;; TODO: mark maps as abstract or not for correct abstraction.
@@ -605,7 +631,7 @@ FIXMEs:
             'key)]
 
      [(Meta-function-call si name arg-pat)
-      (bind (Term #t arg-pat)
+      (bind (Term pure arg-pat)
             (cons 'MF-arg rev-addr)
             (λ (arg*)
                (values (Meta-function-call si name arg*)
@@ -737,7 +763,7 @@ FIXMEs:
 
 (define (rules-hints rules)
   (hint-map (λ (rule tail)
-               (match-define (Rule name lhs rhs bscs) rule)
+               (match-define (Rule name lhs rhs bscs si) rule)
                (bscs-hints bscs tail))
             rules '()))
 
@@ -755,7 +781,7 @@ FIXMEs:
 
 (define (expression-hints expr tail)
   (match expr
-    [(or (Choose _ expr)
+    [(or (Choose _ _ expr)
          (Store-lookup _ expr)
          (In-Dom _ _ expr))
      (expression-hints expr tail)]
@@ -774,6 +800,7 @@ FIXMEs:
     [(Set-Union _ exprs) (hint-map expression-hints exprs tail)]
     [(Set-Add* _ expr exprs)
      (expression-hints expr (hint-map expression-hints exprs tail))]
-    [_ tail]))
+    [(or (? Term?) (? Empty-set?) (? Boolean?) (? Meta-function-call?)) tail]
+    [_ (error 'expression-hints "Unhandled expression ~a" expr)]))
 
 ;; [1] Might and Shivers ICFP 2006 "Improving flow analyses via ΓCFA: Abstract garbage collection and counting"
