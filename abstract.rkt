@@ -194,12 +194,14 @@ The abstract semantics differs from the concrete semantics in the following ways
       [(atom atom) #t]
 
       [((external ex v₀) (external ex v₁))
-       (match-define (External-Space _ card precision special-equality) ex)
-       (if special-equality
-           (special-equality v₀ v₁ μ) ;;a/equal?
+       (match-define (External-Space _ card precision ≡) ex)
+       (if ≡
+           (≡ v₀ v₁ μ) ;;a/equal?
            (match precision
              ['concrete (equal? v₀ v₁)]
-             ['discrete-abstraction (b∧ (equal? v₀ v₁) (implies (eq? (card v₀ μ)) 'b.⊤))]
+             ['discrete-abstraction
+              (b∧ (equal? v₀ v₁)
+                  (implies (eq? (card v₀ μ) 'ω) 'b.⊤))]
              ['abstract (error 'a/equal? "Cannot have non-discrete abstraction of external values without a custom equality relation ~a" d₀)]))]
       [(_ _) #f]))
 
@@ -248,9 +250,7 @@ The abstract semantics differs from the concrete semantics in the following ways
       [((? Rvar?) x) (error 'a/match "Unexpected reference in match pattern ~a" x)]
 
       [(a₀ a₁) (values (a/equal? a₀ a₁ store-spaces μ) ρ)]))
-(trace inner)
   (inner pattern data ρ))
-(trace a/match)
 
 ;; Evaluation is marked with a "certain?" to determine if the results follow a side-condition or pattern-match
 ;; that "may" fail. This qualification is to reuse evaluation for the semantics of meta-functions,
@@ -273,6 +273,8 @@ The abstract semantics differs from the concrete semantics in the following ways
 
 ;;; Always reads? expressions
       ;; reads? is true
+      ;; FIXME: I'm unclear whether we should treat the codomain of a store as an abstract value that happens to be a set,
+      ;; or simply as a set. This is a tough matter when we consider adding lazy-nondeterminism.
       [(Store-lookup _ kexpr)
        (for/hash ([(choice kres) (in-hash (inner kexpr ρ store-spaces μ choices certain?))])
          (match-define (Abs-Result/effect kcertain? kv store-spaces* μ*) kres)
@@ -631,7 +633,6 @@ The abstract semantics differs from the concrete semantics in the following ways
       [(Boolean _ b) (hash choices (Abs-Result/effect certain? b store-spaces μ))]
 
       [bad (error 'expr-eval "Bad expression ~a" bad)])))
-(trace slow-expression-eval)
 
 ;; Binding/Store-extend/When are side-effecting statements (local/global/control).
 ;; They are available at the top level and in Let expressions.
