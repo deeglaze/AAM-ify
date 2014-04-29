@@ -5,8 +5,8 @@
 (provide ;; Abstract counting algebra
          μ+ μmax μ⊔ c+ cmax c⊑
          ;; Ternary logic algebra
-         b∨ b∧ b¬ bδ ⦃b⦄ q∧
-         for/bδ for*/bδ
+         b∨ b∧ b¬ b⊔ ⦃b⦄ q∧
+         for/b⊔ for*/b⊔
          for/b∧ for*/b∧
          for/b∨ for*/b∨
          ;; Ternary wrappers
@@ -68,7 +68,7 @@
 (define (b¬ b) (if (eq? b 'b.⊤) 'b.⊤ (not b)))
 
 ;; 'b.⊤ if different, except if b₀ is -unmapped, in which case we get b₁
-(define (bδ b₀ b₁)
+(define (b⊔ b₀ b₁)
   (cond [(eq? b₀ -unmapped) b₁]
         [(eq? b₀ b₁) b₁]
         [else 'b.⊤]))
@@ -97,8 +97,8 @@
 (define-for/b-op for/b∧ for/fold #t b∧ bval (not bval))
 (define-for/b-op for*/b∧ for*/fold #t b∧ bval (not bval))
 ;; short-circuit on 'b.⊤
-(define-for/b-op for/bδ for/fold -unmapped bδ bval (eq? bval 'b.⊤))
-(define-for/b-op for*/bδ for*/fold -unmapped bδ bval (eq? bval 'b.⊤))
+(define-for/b-op for/b⊔ for/fold -unmapped b⊔ bval (eq? bval 'b.⊤))
+(define-for/b-op for*/b⊔ for*/fold -unmapped b⊔ bval (eq? bval 'b.⊤))
 ;; short-circuit on #t
 (define-for/b-op for/b∨ for/fold #f b∨ bval (eq? bval #t))
 (define-for/b-op for*/b∨ for*/fold #f b∨ bval (eq? bval #t))

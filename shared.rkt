@@ -105,12 +105,11 @@ Utility functions and specific functions that are shared between concrete and ab
 ;; in-space? : DPattern Language Space-name → Boolean
 ;; Decide whether a DPattern d is in Space space-name, which is defined in Language L.
 (define (in-space-ref? L space-name d)
-  (match-define (Language lang-name spaces _) L)
+  (match-define (Language spaces _) L)
   (define space
     (hash-ref spaces space-name
-              (λ () (error 'in-space? "Undefined space ~a in language ~a"
-                           space-name
-                           lang-name))))
+              (λ () (error 'in-space? "Undefined space ~a"
+                           space-name))))
   (in-space? L space d))
 
 (define (in-variant? L var d)
@@ -124,7 +123,7 @@ Utility functions and specific functions that are shared between concrete and ab
     [_ #f]))
 
 (define (in-space? L space d)
-  (match-define (Language lang-name spaces _) L)
+  (match-define (Language spaces _) L)
   (match space
     [(User-Space variants-or-components _ _)
      (for/or ([var (in-list variants-or-components)])
@@ -167,7 +166,7 @@ Utility functions and specific functions that are shared between concrete and ab
 ;; Any head-position constructor is considered a variant.
 ;; Ensure all variants exist in L.
 (define (sexp-to-dpattern/check sexp expected-space-name L)
-  (match-define (Language name spaces _) L)
+  (match-define (Language spaces _) L)
   (define (component-sexp-to-dpat comp sexp)
     (match comp
       [(℘ comp)

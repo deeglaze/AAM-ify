@@ -14,7 +14,7 @@ Allow stores (special)
 ;; Where scope of space names is letrec*
 ;; All occurrences of the same named Variant are expected to have a total ordering.
 ;;   That is, some spaces may use a refined notion of a variant, but never a re-defined notion.
-(struct Language (name spaces refinement-order) #:transparent)
+(struct Language (spaces refinement-order) #:transparent)
 
 ;; TODO list for Language sanity checking:
 ;; - DONE (abstract-language): check for undefined spaces
@@ -49,6 +49,12 @@ Allow stores (special)
 ;; - (discrete-ffun Dict) [still abstract, but has faster equality tests]
 (struct abstract-ffun (dict) #:transparent)
 (struct discrete-ffun (dict) #:transparent)
+;; A member of QSet is of of
+;; - Set
+;; - (abstract-set Set)
+;; - (discrete-set Set)
+(struct abstract-set (set) #:transparent)
+(struct discrete-set (set) #:transparent)
 
 ;; TODO?: allow variants or components to have side-conditions
 (struct Variant (name Components) #:transparent)
@@ -102,7 +108,8 @@ Allow stores (special)
 ;; A user space may not have duplicate variants.
 (struct User-Space (variants trust-recursion? trust-construction?) #:transparent)
 (struct Address-Space (space) #:transparent)
-(struct External-Space (pred cardinality precision special-equality) #:transparent)
+(struct External-Space (pred cardinality precision ≡ #;⊔ #;⊑
+                             ) #:transparent)
 
 ;; A member of an External space is one of
 ;; - (external external-space Any)
@@ -135,7 +142,10 @@ Allow stores (special)
 ;;       We use standard vectors.
 ;; NOTE: map-with needs a pointer to the map's type for proper matching.
 (struct Bvar (x Space) #:transparent)
+(struct Map-with (mp kp vp) #:transparent)
+(struct Set-with (sp vp) #:transparent)
 (struct Rvar (x) #:transparent)
+
 (define ρ₀ (hash))
 (define ∅ (set))
 (define ⦃∅⦄ (set ∅))
@@ -143,13 +153,15 @@ Allow stores (special)
 
 ;; A DPattern (or "data pattern") is either
 ;; - an atom
-;; - a (variant Variant Immutable-Vector[DPattern]) [morally]
-;; - a (discrete-ffun Dict)
-;; - a (abstract-ffun Dict)
-;; - a Dict [trusted to have a concrete domain]
+;; - a  (variant Variant Immutable-Vector[DPattern]) [morally]
+;; - a  (discrete-ffun Dict)
+;; - an (abstract-ffun Dict)
+;; - a  Dict [trusted to have a concrete domain]
 ;; - an (Address-Structural _)
 ;; - an (Address-Egal _)
-;; - a Set[DPattern]
+;; - a  (discrete-set Set[DPattern])
+;; - an (abstract-set Set[DPattern])
+;; - a  Set[DPattern] [trusted to have a concrete space]
 
 ;; An Abs-Data is an (Abs-Data Set[DPattern])
 (struct Abs-Data (data) #:transparent)
@@ -178,32 +190,56 @@ Allow stores (special)
 ;; - alloc       (00010b)
 ;; - many        (00001b)
 ;; All encoded as a 5 bit number (fixnum)
-(define (reads? n) (fxand n 8)) (define (add-reads n) (fxior n 8))
-(define (writes? n) (fxand n 4)) (define (add-writes n) (fxior n 4))
-(define (allocs? n) (fxand n 2)) (define (add-allocs n) (fxior n 2))
-(define (many? n) (fxand n 1)) (define (add-many n) (fxior n 1))
 (define-values
   (pure many allocs alloc/many
-   write write/many write/alloc write/alloc/many
-   read read/many read/alloc read/alloc/many
+   writes write/many write/alloc write/alloc/many
+   reads read/many read/alloc read/alloc/many
    read/write read/write/many read/write/alloc read/write/alloc/many)
   (apply values (range 16)))
 
+(define (reads? n) (not (eq? 0 (fxand n reads))))
+(define (writes? n) (not (eq? 0 (fxand n writes)))) 
+(define (allocs? n) (not (eq? 0 (fxand n allocs))))
+(define (many? n) (not (eq? 0 (fxand n many))))
+
+(define (add-reads n) (fxior n reads))
+(define (add-writes n) (fxior n writes))
+(define (add-allocs n) (fxior n allocs))
+(define (add-many n) (fxior n many))
+
 (struct expression (store-interaction) #:transparent)
+;; A Set-Container is one of
+;; - values
+;; - abstract-set
+;; - discrete-set
+
+;; A Map-Container is one of
+;; - values
+;; - abstract-ffun
+;; - discrete-ffun
+
+
 ;; An Expression is one of
 ;; - (Term Pattern)
 ;; - (Boolean Boolean)
 ;; - (Map-lookup Symbol Expression Boolean Expression)
 ;; - (Map-extend Symbol Expression Expression Boolean)
+;; - (Map-remove Symbol Expression)
+;; - (Empty-map (∪ Map-Container Expression))
+;; - (Map-empty? Symbol)
 ;; - (Store-lookup Expression)
 ;; - (If Expression Expression Expression)
 ;; - (Let List[Binding] Expression
 ;; - (Equal Expression Expression)
 ;; - (In-Dom Symbol Expression)
-;; - (Empty-set)
+;; - (Empty-set (∪ Set-Container Expression))
 ;; - (Set-Union List[Expression])
 ;; - (Set-Add* Expression List[Expression])
-;; - (In-Set Expression Expression)
+;; - (Set-Remove* Expression List[Expression])
+;; - (Set-Intersect List[Expression])
+;; - (Set-Subtract Expression List[Expression])
+;; - (Empty-set? Expression)
+;; - (In-Set? Expression Expression)
 ;; and the possibly impure
 ;; - (Meta-function-call name Pattern)
 ;; - (SAlloc Symbol)
@@ -218,8 +254,15 @@ Allow stores (special)
 
 (struct Term expression (pat) #:transparent)
 
+(struct Map-empty? expression (mvar) #:transparent)
+(struct Empty-map expression (container) #:transparent)
 (struct Map-lookup expression (mvar key-expr default? def-expr) #:transparent)
 (struct Map-extend expression (mvar key-expr val-expr trust-strong?) #:transparent)
+(struct Map-remove expression (mvar key-expr) #:transparent) ;; doesn't error if key not present.
+(struct In-Dom? expression (mvar key-expr) #:transparent)
+;; XXX: Should be definable with the map-with pattern and Map-empty?
+#;(struct Pre-image expression (mvar val-expr) #:transparent)
+
 (struct Store-lookup expression (key-expr) #:transparent)
 
 (struct Meta-function-call expression (name arg-pat) #:transparent)
@@ -227,12 +270,15 @@ Allow stores (special)
 (struct If expression (g t e) #:transparent)
 (struct Equal expression (l r) #:transparent)
 (struct Let expression (bindings body-expr) #:transparent)
-(struct In-Dom expression (mvar key-expr) #:transparent)
 
+(struct Set-empty? expression (expr) #:transparent)
+(struct Empty-set expression (container) #:transparent)
 (struct Set-Union expression (exprs) #:transparent)
-(struct Empty-set expression () #:transparent)
+(struct Set-Intersect expression (set-expr exprs) #:transparent)
+(struct Set-Subtract expression (set-expr exprs) #:transparent)
+(struct Set-Remove* expression (set-expr exprs) #:transparent)
 (struct Set-Add* expression (set-expr exprs) #:transparent)
-(struct In-Set expression (set-expr expr) #:transparent)
+(struct In-Set? expression (set-expr expr) #:transparent)
 
 (struct Unsafe-store-space-ref expression () #:transparent)
 (struct Unsafe-store-ref expression (space) #:transparent)
