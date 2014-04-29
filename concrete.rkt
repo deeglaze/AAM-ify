@@ -133,7 +133,7 @@ in the spaces.rkt format.
 
     [(Term _ pat) (set (Result/effect (pattern-eval pat ρ) store-spaces))]
 
-    [(In-Dom _ m kexpr)
+    [(In-Dom? _ m kexpr)
      (define mv (hash-ref ρ m (unbound-map-error 'map-ext m)))
      (for/set ([kres (in-set (expression-eval kexpr ρ store-spaces))])
        (match-define (Result/effect kv store-spaces*) kres)
@@ -159,7 +159,7 @@ in the spaces.rkt format.
               (set-union acc
                          (do-add exprs (set-add cur-set v) store-spaces*)))])))]
 
-    [(In-Set _ set-expr expr)
+    [(In-Set? _ set-expr expr)
      (for/fold ([acc ∅]) ([sres (in-set (expression-eval set-expr ρ store-spaces))])
        (match-define (Result/effect sv store-spaces*) sres)
        (for/fold ([acc acc]) ([res (in-set (expression-eval expr ρ store-spaces*))])
