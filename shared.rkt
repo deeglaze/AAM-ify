@@ -24,24 +24,30 @@ Utility functions and specific functions that are shared between concrete and ab
          set-add*
          list-of-sets→set-of-lists
          sexp-to-dpattern/check
-         dpattern->sexp
-         language-parms^ language-impl^)
+         extract-set/container extract-map/container
+         dpattern->sexp)
 
-(define-signature language-parms^
-  (L ;; Language
-   alloc ;; State Map[Symbol,DPattern] [Any] → Any
-   Ξ ;; Map[Symbol,Meta-function]
-   trace-update))
-;; A Store-Space is a Map[Address-Space-Name,Map[Any,DPattern]]
-;; An Abs-Count is a Map[Any,Card]
-(define-signature language-impl^
-  (expression-eval ;; [Abs-]State Expression Store-Space [Abs-Count] → Set[[Abs-]Result/effect]
-   rule-eval ;; Rule Store-Space [Abs-]State → Set[[Abs-]State]
-   mf-eval ;; [Abs-]State Store-Space Meta-function DPattern [Abs-Count] → Set[[Abs-]Result/effect]
-   ))
-
-(define-syntax-rule (implies p q) (if p q #t))
 (define (unbound-map-error who m) (λ () (error who "Map unbound ~a" m)))
+
+(define (extract-set/container v fail-msg)
+  (match v
+    [(? set? S) (values S values)]
+    [(abstract-set S) (values S abstract-set)]
+    [(discrete-set S) (values S discrete-set)]
+    [other
+     (when fail-msg
+      (log-info (format fail-msg other)))
+     (values #f #f)]))
+
+(define (extract-map/container v fail-msg)
+  (match v
+    [(? hash? map) (values map values)]
+    [(abstract-ffun map) (values map abstract-ffun)]
+    [(discrete-ffun map) (values map discrete-ffun)]
+    [other
+     (when fail-msg
+      (log-info (format fail-msg other)))
+     (values #f #f)]))
 
 ;; pattern-eval : Pattern Map[Symbol,DPattern] → DPattern
 ;; Concretize a pattern given an environment of bindings.

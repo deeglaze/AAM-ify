@@ -10,7 +10,8 @@ in the spaces.rkt format.
          racket/trace
          racket/unit
          "spaces.rkt"
-         "shared.rkt")
+         "shared.rkt"
+         "signatures.rkt")
 (provide concrete-semantics@)
 
 (define-unit concrete-semantics@
@@ -41,6 +42,7 @@ in the spaces.rkt format.
                  [else
                   (log-info (format "Match failure: non-linear binding mismatch ~a ~a" other d))
                   #f])])]
+
       [((variant v comps) (variant v* ds))
        (cond
         [(eq? (Variant-name v) (Variant-name v*))
@@ -53,6 +55,13 @@ in the spaces.rkt format.
            ρ*)]
         [else (log-info "Match failure: variant mismatch ~a ~a" pattern data)
               #f])]
+
+      [((Map-with kpat vpat mpat mode) d)
+       (error 'c/match "TODO Map-with")]
+
+      [((Set-with vpat spat mode) d)
+       (error 'c/match "TODO Set-with")]
+
       [((? Rvar?) x) (error 'c/match "Unexpected reference in match pattern ~a" x)]
 
       [((? Address-Structural? a₀) (? Address-Structural? a₁))
@@ -103,8 +112,15 @@ in the spaces.rkt format.
          ([kres (in-set ks)])
        (match-define (Result/effect k store-spaces*) kres)
        (for/fold ([acc acc]) ([vres (in-set (expression-eval vexpr ρ store-spaces*))])
-       (match-define (Result/effect v store-spaces**) vres)
+         (match-define (Result/effect v store-spaces**) vres)
          (set-add acc (Result/effect (hash-set mv k v) store-spaces**))))]
+    [(Empty-map _ _) (set (Result/effect #hash() store-spaces))]
+    [(Map-empty? _ m)
+     (set (Result/effect
+           (eq? 0 (dict-count (hash-ref ρ m (unbound-map-error 'map-empty? m))))
+           store-spaces))]
+    [(Map-remove _ m kexpr)
+     (error 'c/expression-eval "TODO map-remove")]
 
     [(Meta-function-call _ f arg)
      ;; meta-functions also have non-deterministic choice.
@@ -158,6 +174,12 @@ in the spaces.rkt format.
               (match-define (Result/effect v store-spaces*) res)
               (set-union acc
                          (do-add exprs (set-add cur-set v) store-spaces*)))])))]
+    [(Set-Intersect _ set-expr exprs)
+     (error 'c/expression-eval "TODO set-intersect")]
+    [(Set-Remove* _ set-expr exprs)
+     (error 'c/expression-eval "TODO set-remove*")]
+    [(Set-Subtract _ set-expr exprs)
+     (error 'c/expression-eval "TODO set-subtract")]
 
     [(In-Set? _ set-expr expr)
      (for/fold ([acc ∅]) ([sres (in-set (expression-eval set-expr ρ store-spaces))])
@@ -165,7 +187,7 @@ in the spaces.rkt format.
        (for/fold ([acc acc]) ([res (in-set (expression-eval expr ρ store-spaces*))])
          (match-define (Result/effect v store-spaces*) res)
          (set-add acc (Result/effect (set-member? sv v) store-spaces*))))]
-    [(Empty-set _) (set (Result/effect ∅ store-spaces))]
+    [(Empty-set _ _) (set (Result/effect ∅ store-spaces))]
 
     ;; We get a set of results from expr. We expect these results to be sets.
     ;; We want to embody any (all) choices from these sets, so we flatten them into

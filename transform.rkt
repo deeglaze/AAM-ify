@@ -21,8 +21,11 @@ The key ideas:
          racket/trace
          racket/fixnum
          "spaces.rkt"
-         "shared.rkt")
+         "shared.rkt"
+         "parser.rkt"
+         (for-syntax syntax/parse))
 (provide abstract-language abstract-rule
+         transform-semantics
          alloc-skeleton)
 
 ;; language->graph : Language → unweighted-directed-graph
@@ -112,8 +115,8 @@ The key ideas:
   (define abstract-spaces₀
     (for/fold ([h ρ₀]) ([(name space) (in-dict spaces)])
       (match space
-        [(External-Space _ _ imprecise? _)
-         (hash-set h name imprecise?)]
+        [(External-Space _ _ precision _)
+         (hash-set h name (not (eq? precision 'concrete)))]
         [(Address-Space space)
          (hash-set h name #t)]
         [(User-Space _ trust-recursion? trust-construction?)
@@ -123,6 +126,7 @@ The key ideas:
   (define-values (variant-rec-addrs abstract-spaces₁)
     (for/fold ([rec-addrs ρ₀] [abstract-spaces abstract-spaces₀])
         ([(name space) (in-dict spaces)])
+      
       (match space
         [(or (? External-Space?) (? Address-Space?)) (values rec-addrs abstract-spaces)]
         [(User-Space variants-or-components trust-recursion? trust-construction?)
@@ -297,9 +301,11 @@ The key ideas:
                ;; Already showed current-space is abstract for a different reason.
                ;; We don't know more about name here.
                abs-spaces]
-              [else
+              [(set? dependents)
                ;; If name is abstract, then so is current-space.
-               (hash-join abs-spaces current-space (set-add dependents name))])]))])]
+               (hash-join abs-spaces current-space (set-add dependents name))]
+              [else (error 'find-recursive-mentions-in-component
+                           "INTERNAL: expected boolean or set: ~v" dependents)])]))])]
       [(℘ comp)
        (find-recursive-mentions-in-component comp (cons '℘ rev-addr) abs-spaces)]
       [(Map domain range)
@@ -423,6 +429,12 @@ The key ideas:
             (values (variant v pats*)
                     (reverse binding-scs*)
                     si*)]
+
+           [(Map-with kpat vpat mpat mode)
+            (error 'flatten-pattern "TODO map-with")]
+           [(Set-with vpat spat mode)
+            (error 'flatten-pattern "TODO set-with")]
+
            [(Rvar x) (error 'flatten-pattern "Unexpected reference in match pattern ~a" x)]
            ;; XXX: good?
            [other (values other '() pure)])]))
@@ -432,7 +444,9 @@ The key ideas:
   ;; Hoist inside-out in order to do it in one pass.
   (define (recur current-variant rev-addr rev-local-addr tm)
     (define rec-addresses
-      (if current-variant (hash-ref rec-addrs current-variant ∅) ∅))
+      (if current-variant
+          (hash-ref rec-addrs current-variant ∅)
+          ∅))
     (cond
      [(set-member? rec-addresses (reverse rev-local-addr))
       (define address-var (gensym))
@@ -449,14 +463,16 @@ The key ideas:
               (fxior susi write/alloc))]
      [else
       (match tm
-        [(Bvar x _) (error 'abstract-rule "Rule RHS may not bind ~a" tm)]
+        [(or (? Bvar?) (? Map-with?) (? Set-with?))
+         (error 'abstract-rule "Rule RHS may not bind or match ~a" tm)]
         [(variant (and v (Variant name _)) pats)
          ;; TODO?: error/warn if space defining vname is trusted.
          ;;        Or have second tag trusting construction
          (define len (vector-length pats))
          (define pats* (make-vector len))
          (define-values (rev-store-updates susi)
-          (for/fold ([rev-store-updates '()] [susi pure])
+          (for/fold ([rev-store-updates '()]
+                     [susi pure])
                ([pat (in-vector pats)]
                 [i (in-naturals)])
              (define vfield (Variant-field name i))
@@ -465,7 +481,9 @@ The key ideas:
                       (list vfield)
                       pat))
              (unsafe-vector-set! pats* i pat*)
-             (append (reverse store-updates*) rev-store-updates (fxior susi susi*))))
+             (values
+              (append (reverse store-updates*) rev-store-updates)
+              (fxior susi susi*))))
          (values (variant v pats*) (reverse rev-store-updates) susi)]
         ;; XXX: is this the right thing? Anything else here?
         [other (values other '() pure)])]))
@@ -476,15 +494,42 @@ The key ideas:
   (cond
    [trusted-implementation/abs mf]
    [else
-    (define rules* (for/list ([rule (in-list rules)]) (abstract-rule L rec-addrs ΞΔ rule)))
-    (define si (for/fold ([si pure]) ([rule (in-list rules*)])
-                 (fxior si (Rule-store-interaction rule))))
-    (Meta-function name rules* si trusted-implementation/conc #f)]))
+    (define-values (rev-rules* si)
+      (for/fold ([rrules '()] [si pure]) ([rule (in-list rules)])
+        (define r (abstract-rule L rec-addrs ΞΔ rule))
+        (values (cons r rrules) (fxior si (Rule-store-interaction r)))))
+    (Meta-function name (reverse rev-rules*) si trusted-implementation/conc #f)]))
 
 (define (update-store-interactions-r r ΞΔ)
   (match-define (Rule rule-name lhs rhs bscs si) r)
   (define-values (bscs* si* Δ?) (update-store-interactions-b bscs ΞΔ))
   (values (Rule rule-name lhs rhs bscs* si*) Δ?))
+
+(define (update-store-interactions-mf mf ΞΔ)
+  (match-define (Meta-function name rules si t/conc t/abs) mf)
+  (cond
+   [t/abs (values mf #f)]
+   [else
+    (define-values (rev-rules* si* Δ?)
+      (for/fold ([rrules '()] [si pure] [Δ? #f]) ([rule (in-list rules)])
+        (define-values (r Δ?*) (update-store-interactions-r rule ΞΔ))
+        (values (cons r rrules) (fxior si (Rule-store-interaction r)) (or Δ? Δ?*))))
+    (values (Meta-function name (reverse rev-rules*) si* t/conc #f)
+            (or Δ? (not (fx= si si*))))]))
+
+(define (stabilize-ΞΔ mfs ΞΔ)
+  (define-values (mfs* Δ? ΞΔ*)
+    (for/fold ([mfs ρ₀] [Δ? #f] [ΞΔ ΞΔ])
+        ([(name mf) (in-hash mfs)])
+      (define-values (mf* Δ?*) (update-store-interactions-mf mf ΞΔ))
+      (if Δ?*
+          (values (hash-set mfs name mf*)
+                  #t
+                  (hash-set ΞΔ name (Meta-function-store-interaction mf*)))
+          (values mfs Δ? ΞΔ))))
+  (if Δ?
+      (stabilize-ΞΔ mfs* ΞΔ*)
+      (values mfs* ΞΔ*)))
 
 ;; abstract-rule
 (define (abstract-rule L rec-addrs ΞΔ rule)
@@ -555,7 +600,7 @@ The key ideas:
                              (expression-store-interaction oldv)))
                    otherΔ?)))
 
-  (define (bind* oldv es fn [otherΔ? #f])
+  (define (bind-lst oldv es fn [otherΔ? #f])
     (let recur ([es es] [es* '()] [Δ? otherΔ?] [si pure])
       (match es
         ['() (define v* (fn (reverse es*) si))
@@ -583,7 +628,7 @@ The key ideas:
               (cond
                [default?
                  (bind dexpr
-                       (λ (d*) (Map-lookup (add-many si*) m k* #t d*)))]
+                       (λ (d*) (Map-lookup (add-many (combine k* d*)) m k* #t d*)))]
                [else
                 (Map-lookup (add-many (expression-store-interaction k*)) m k* #f #f)])))]
 
@@ -594,15 +639,13 @@ The key ideas:
                     (λ (v*)
                        (Map-extend (combine k* v*) m k* v* trust-strong?)))))]
 
-    [(Pre-image _ m vexpr)
-     (bind e vexpr
-           (λ (v*)
-              (Pre-image (add-many (expression-store-interaction v*)) m v*)))]
-
     [(Meta-function-call si name arg-pat)
      (define si* (hash-ref ΞΔ name read/write/alloc/many))
      (values (Meta-function-call si* name arg-pat)
              (not (fx= si si*)))]
+
+    [(Choose si ℓ ec)
+     (bind e ec (λ (ec*) (Choose (add-many (combine ec*)) ℓ ec*)))]
 
     [(If si gu th el)
      (bind e gu
@@ -634,18 +677,33 @@ The key ideas:
      (bind e kexpr
            (λ (k*) (In-Dom? (add-many (expression-store-interaction k*)) mvar k*)))]
 
-    [(Set-Empty? _ sexpr)
+    [(Set-empty? _ sexpr)
      (bind e sexpr
-           (λ (s*) (Set-Empty? (add-many (expression-store-interaction s*)) sexpr)))]
+           (λ (s*) (Set-empty? (add-many (expression-store-interaction s*)) sexpr)))]
 
-    [(Set-Intersect _ sexprs) ;; INVARIANT: (pair? sexprs)
-     (bind* e sexprs (λ (ss* si) (Set-Intersect (add-many si) ss*)))]
+    [(Set-Intersect _ set-expr sexprs)
+     (bind e set-expr
+           (λ (s*)
+              (bind-lst e sexprs (λ (ss* si)
+                                 (Set-Intersect
+                                  (add-many (fxior si (combine s*)))
+                                  s*
+                                  ss*)))))]
+
+    [(Set-Remove* _ set-expr sexprs)
+     (bind e set-expr
+           (λ (s*)
+              (bind-lst e sexprs (λ (ss* si)
+                                 (Set-Remove*
+                                  (add-many (fxior si (combine s*)))
+                                  s*
+                                  ss*)))))]
 
     [(Set-Union _ sexprs)
-     (bind* e sexprs (λ (ss* si) (Set-Union si ss*)))]
+     (bind-lst e sexprs (λ (ss* si) (Set-Union si ss*)))]
 
     [(Set-Add* _ sexpr vexprs)
-     (bind e sexpr (λ (s*) (bind* e vexprs
+     (bind e sexpr (λ (s*) (bind-lst e vexprs
                                   (λ (vs* si)
                                      (Set-Add*
                                       (fxior si (expression-store-interaction s*))
@@ -655,7 +713,7 @@ The key ideas:
      (if (empty? dexprs)
          (recur sexpr)
          (bind e sexpr
-               (λ (s*) (bind* e dexprs
+               (λ (s*) (bind-lst e dexprs
                               (λ (ds* si)
                                  (Set-Subtract
                                   ;; approximate sets ⇒ many subtractions
@@ -720,7 +778,7 @@ The key ideas:
 (define ((bind* rec-addrs ΞΔ) expr path fn [name #f])
   (define e* (abstract-expression* rec-addrs ΞΔ expr path))
   (cond
-   [Δ?
+   [(writes? (expression-store-interaction e*))
     (define var (if name (gensym name) (gensym 'intermediate)))
     (define r (fn (Term pure (Rvar var))))
     (Let (fxior (expression-store-interaction e*)
@@ -737,6 +795,25 @@ The key ideas:
 ;;              then only meta-function-call's that produce new stores get marked as changing store.
 (define (abstract-expression rec-addrs ΞΔ alloc-tag expr)
   (abstract-expression* rec-addrs ΞΔ expr (list alloc-tag)))
+
+(define-syntax (transform-semantics stx)
+  (syntax-parse stx
+    [(_ L:Lang red:expr)
+     (syntax/loc stx
+       (let*-values ([(rL) (reify-language L)]
+                     [(abs-lang rec-addrs abstract-spaces)
+                      (abstract-language rL)]
+                     [(mfs ΞΔ)
+                      (for/fold ([mfs ρ₀] [ΞΔ ρ₀])
+                          ([(name mf) (in-hash (reify-metafunctions-of L))])
+                        (define mf* (abstract-meta-function rec-addrs ρ₀ mf))
+                        (values (hash-set mfs name mf*)
+                                (hash-set ΞΔ name (Meta-function-store-interaction mf*))))]
+                     [(mfs* ΞΔ*) (stabilize-ΞΔ mfs ΞΔ)])
+         (values abs-lang
+                 mfs*
+                 (for/list ([rule (in-list red)])
+                   (abstract-rule abs-lang rec-addrs ΞΔ* rule)))))]))
 
 ;; FIXME: the output store-interactions are wrong.
 (define (abstract-expression* rec-addrs ΞΔ expr rev-addr)
@@ -760,6 +837,11 @@ The key ideas:
                (Choose (add-many slsi) (gensym) (Store-lookup slsi k*)))
             'key)]
 
+     [(Choose _ ℓ cexpr)
+      (bind cexpr
+            (cons 'Choose-expr rev-addr)
+            (λ (ec*) (Choose (add-many (combine ec*)) ℓ ec*)))]
+     
      [(Map-lookup _ m kexpr default? dexpr)
       (bind kexpr
             (cons 'ML-key rev-addr)
@@ -832,7 +914,9 @@ The key ideas:
      [(In-Dom? _ mvar kexpr)
       (bind kexpr
             (cons 'In-Dom?-key rev-addr)
-            (λ (k*) (In-Dom? si mvar k*)))]
+            (λ (k*) (In-Dom? (add-many (expression-store-interaction k*))
+                             mvar
+                             k*)))]
 
      [(Set-Union _ sexprs)
       (if (empty? sexprs)
@@ -940,7 +1024,7 @@ The key ideas:
     [(or (Choose _ _ expr)
          (Store-lookup _ expr)
          (In-Dom? _ _ expr)
-         (Set-Empty? _ expr))
+         (Set-empty? _ expr))
      (expression-hints expr tail)]
     [(or (? SAlloc?) (? MAlloc?))
      (error 'expression-hints "Unqualified allocation ~a" expr)]
@@ -954,10 +1038,12 @@ The key ideas:
      (expression-hints g (expression-hints t (expression-hints e tail)))]
     [(Let _ bscs bexpr)
      (bscs-hints bscs (expression-hints bexpr tail))]
-    [(or (Set-Union _ exprs)
-         (Set-Intersect _ exprs))
+    [(Set-Union _ exprs)
      (hint-map expression-hints exprs tail)]
-    [(or (Set-Add* _ expr exprs) (Set-Subtract _ expr exprs))
+    [(or (Set-Add* _ expr exprs)
+         (Set-Remove* _ expr exprs)
+         (Set-Subtract _ expr exprs)
+         (Set-Intersect _ expr exprs))
      (expression-hints expr (hint-map expression-hints exprs tail))]
     [(or (? Term?) (? Empty-set?) (? Boolean?) (? Meta-function-call?)) tail]
     [_ (error 'expression-hints "Unhandled expression ~a" expr)]))

@@ -1,7 +1,43 @@
 #lang racket/base
-(require "parser.rkt" "shared.rkt" "spaces.rkt"
+(require "parser.rkt" "shared.rkt" "spaces.rkt" "signatures.rkt"
+         "transform.rkt"
          racket/unit
          (for-syntax racket/base))
+
+(define-language CESK
+  [BAddrs #:address-space bindings]
+  [Variable #:external-space symbol? #:cardinality (λ (e) 1)]
+  [Env (Variable → (Address-Space bindings))]
+  [Expr (Ref Variable) (App Expr Expr) Pre-value #:trust-recursion]
+  [Pre-value (Lam Variable Expr) #:trust-recursion]
+  [With-env (Closure Expr Env)]
+  [Value (Closure Pre-value Env)]
+  #:refinement ([Closure (Value With-env)])
+  [Frame (Ar Expr Env) (Fn Value)]
+  [Kont (Mt) (Kcons Frame Kont)]
+  [States (State With-env Kont)])
+
+(define CESK-R
+  (reduction-relation CESK
+    [--> #:name variable-lookup
+         (State (Closure (Ref x) ρ) κ)
+         (State v κ)
+         (where v (Store-lookup (Map-lookup ρ x)))]
+    [--> #:name application
+         (State (Closure (App e₀ e₁) ρ) κ)
+         (State (Closure e₀ ρ) (Kcons (Ar e₁ ρ) κ))]
+    [--> #:name argument-eval
+         (State (Bvar v Value) (Kcons (Ar e ρ) κ))
+         (State (Closure e ρ) (Kcons (Fn v) κ))]
+    [--> #:name function-eval
+         (State (Bvar v Value) (Kcons (Fn (Closure (Lam x e) ρ)) κ))
+         (State (Closure e ρ*) κ)
+         (where a (MAlloc bindings))
+         (where ρ* (Map-extend ρ x a))
+         (update a v)]))
+(define-values (CESK♯ CESK-R♯ CESK-Ξ♯)
+  (transform-semantics CESK CESK-R))
+
 ;; Can't put this in define-unit since it does compile-time side-effects.
 (define-language CM-L
   [BAddrs #:address-space bindings]

@@ -53,7 +53,7 @@ Allow stores (special)
 ;; - Set
 ;; - (abstract-set Set)
 ;; - (discrete-set Set)
-(struct abstract-set (set) #:transparent)
+(struct abstract-set (set) #:transparent) 
 (struct discrete-set (set) #:transparent)
 
 ;; TODO?: allow variants or components to have side-conditions
@@ -97,11 +97,12 @@ Allow stores (special)
 
 ;; A Space is one of
 ;; - (User-Space List[Either[Variant,Component]] Boolean)
-;; - (External-Space (Any → Boolean) (Any [Addr ↦ Card] → Card) Boolean)
+;; - (External-Space (Any → Boolean) (Any [Addr ↦ Card] → Card) Precision-Classifier
+;;                   (Any Any Store-Spaces Card-map equality-map → Boolean♯)
 ;; - (Address-Space)
 ;; An external space has a predicate that decides membership,
 ;; a cardinality analysis for values of the space (may be given the abstract count [1] map), and
-;; a boolean that is #t iff the cardinality analysis is ever not 1,
+;; a precision-classifier that is 'concrete if the cardinality analysis is always 1,
 ;; an optional (Any Any [Addr ↦ Card] → Boolean♯) that quasi-decides equality given count info.
 ;;  NOTE: if not given, equality falls back on structural equality plus cardinality analysis.
 ;;
@@ -128,8 +129,8 @@ Allow stores (special)
 ;; - a (Bvar Symbol Option[Space-name])
 ;; - an (Rvar Symbol)
 ;; - a (variant Variant Immutable-Vector[Pattern]) [morally]
-;; - TODO: a (set-with Pattern Pattern) [for structural termination arguments]
-;; - TODO: a (map-with QMap Pattern Pattern Pattern) [for structural termination arguments]
+;; - a (Set-with Pattern Pattern Match-mode) [for structural termination arguments]
+;; - a (Sap-with QMap Pattern Pattern Pattern Match-mode) [for structural termination arguments]
 ;;   XXX: how to handle May-present entries?
 ;; - an atom
 ;; Bvar patterns bind on the left if not already mapped.
@@ -140,15 +141,24 @@ Allow stores (special)
 ;;       if the value is in the specified Space (it is assumed to succeed).
 ;; NOTE: I say morally for immutable, since Racket doesn't have the best support for immutable vectors.
 ;;       We use standard vectors.
-;; NOTE: map-with needs a pointer to the map's type for proper matching.
+
+;; A Match-mode is one of
+;; - 'any {anything that completely matches, regardless of quality}
+;; - 'all {all matches}
+;; - 'best {a match with the highest quality possible with the patterns}
 (struct Bvar (x Space) #:transparent)
-(struct Map-with (mp kp vp) #:transparent)
-(struct Set-with (sp vp) #:transparent)
+(struct Map-with (kp vp mp mode) #:transparent)
+(struct Set-with (vp sp mode) #:transparent)
 (struct Rvar (x) #:transparent)
 
 (define ρ₀ (hash))
 (define ∅ (set))
 (define ⦃∅⦄ (set ∅))
+
+(define A∅ (abstract-set ∅))
+(define D∅ (discrete-set ∅))
+(define Aρ₀ (abstract-ffun ρ₀))
+(define Dρ₀ (discrete-ffun ρ₀))
 (define (Avar x) (Bvar x #f))
 
 ;; A DPattern (or "data pattern") is either

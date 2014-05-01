@@ -1,5 +1,6 @@
 #lang racket/base
 (require "spaces.rkt" "shared.rkt" "transform.rkt" "concrete.rkt" "abstract.rkt"
+         "signatures.rkt"
          (for-syntax syntax/parse racket/base)
          racket/unit
          racket/pretty racket/set racket/match)
@@ -13,7 +14,7 @@
                                                                   #:exists 'replace))]))
                         #:defaults ([port (λ (p body) #`(let ([#,p (current-output-port)]) #,body))])))
      #`(let ([lr (make-log-receiver (current-logger) kind)])
-         (thread (λ () 
+         (thread (λ ()
                     #,((attribute port)
                        #'p
                        #'(let loop () (define vs (sync lr)) (write vs p) (newline p) (newline p) (loop))))))]))
@@ -27,7 +28,7 @@
 (define vlam (Variant 'Lam (vector (Space-reference 'Variable)
                                    (Space-reference 'Expr))))
 (define vclo (Variant 'Closure (vector (Space-reference 'Expr) (Space-reference 'Env))))
-;;; REFINEMENT 
+;;; REFINEMENT
 (define vclov (Variant 'Closure (vector (Space-reference 'Pre-value)
                                         (Space-reference 'Env))))
 (define vkar (Variant 'Ar (vector (Space-reference 'Expr) (Space-reference 'Env))))
@@ -39,7 +40,6 @@
 (define vspace (User-Space (list vclov) #f #t))
 (define CESK-lang
   (Language
-   'LC/CESK
    (hash
     'Variable (External-Space symbol? (λ (e) 1) #f #f)
     'Env (User-Space (list (Map (Space-reference 'Variable) (Address-Space 'bindings))) #f #f)
@@ -101,8 +101,8 @@
                                          (Avar 'ρ)))
                    (Avar 'κ)))
          (variant vstate (vector (Rvar 'v) (Rvar 'κ)))
-         (list (Binding (Avar 'v) (Store-lookup read (Map-lookup pure 'ρ (Term pure (Rvar 'x)) #f #f))))
-         read)
+         (list (Binding (Avar 'v) (Store-lookup reads (Map-lookup pure 'ρ (Term pure (Rvar 'x)) #f #f))))
+         reads)
    (Rule 'application
          (variant vstate
                   (vector
@@ -152,11 +152,13 @@
 (newline)
 (define abs-semantics
   (for/list ([rule (in-list CESK-reduction)])
+    (printf "Rule: ~a~%" rule)
     (abstract-rule abs-lang rec-addrs #hash() rule)))
 (when #t
   (pretty-print abs-semantics))
 (define-values (hint-fn hint-stx) (alloc-skeleton abs-semantics #hash()))
-(displayln (syntax->datum hint-stx))
+
+(pretty-print (syntax->datum hint-stx))
 
 (define (c/apply-reduction-relation rules)
   (apply-reduction-relation rule-eval rules))
@@ -184,4 +186,3 @@
     (match-define (Abs-State tm store-spaces μ τ̂) out)
     (printf "(Abs-State ~a ~a ~a ~a)~%" (dpattern->sexp tm) store-spaces μ τ̂)
     out))
-(sleep 1)
