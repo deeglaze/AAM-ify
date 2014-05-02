@@ -18,14 +18,16 @@ identifiers for syntax errors.
 TODO?: Add binding arrows using DrRacket's API
 |#
 (require "spaces.rkt" "shared.rkt"
-         (for-syntax          
+         (for-syntax
+
+          racket/pretty racket/trace
+
           racket/base "spaces.rkt"
           racket/list
           racket/match racket/dict racket/set racket/promise racket/vector
           syntax/parse racket/syntax syntax/id-table
           syntax/parse/experimental/template
           (only-in racket/bool implies)
-          racket/trace
           racket/fixnum))
 (provide define-language
          reduction-relation
@@ -158,7 +160,7 @@ TODO?: Add binding arrows using DrRacket's API
   (match e
     [(with-orig-stx v core stx)
      (define do quine-expression)
-     (define v* 
+     (define v*
        (match v
          [(Term si p) #`(Term #,si #,(quine-pattern p))]
          [(or (? Boolean?) (? Map-empty??)
@@ -385,12 +387,14 @@ TODO?: Add binding arrows using DrRacket's API
 (define-syntax-class (Patterns L expected-spaces/components pattern? bound-vars pun-space?)
   #:attributes (values non-linear? new-scope)
   (pattern ()
-           #:fail-unless (null? expected-spaces/components) 
+           #:fail-unless (null? expected-spaces/components)
            (format "Expected more components ~a" expected-spaces/components)
            #:attr values '()
            #:attr non-linear? #f
            #:attr new-scope bound-vars)
-  (pattern ((~var p (Pattern L (and (not pattern?) ;; FIXME: what about the pattern case?
+  (pattern ((~fail #:when (null? expected-spaces/components)
+                   "Expected fewer components")
+            (~var p (Pattern L (and (not pattern?) ;; FIXME: what about the pattern case?
                                     (car expected-spaces/components))
                              pattern? bound-vars pun-space?))
             .
@@ -434,7 +438,7 @@ TODO?: Add binding arrows using DrRacket's API
   (pattern (~and orig-stx
                  (Name v:id (~var p (Pattern L expected-space/component #t bound-vars pun-space?))))
            #:fail-unless pattern? "Terms may not use Name. Not in binding context."
-           
+
            #:attr value (with-orig-stx
                          (Name #'v (attribute p.value))
                          #`(Name 'v #,(with-orig-stx-core (attribute p.value)))
@@ -571,7 +575,7 @@ TODO?: Add binding arrows using DrRacket's API
            (format "Name reserved for the pattern language ~a" (syntax-e #'constructor))
            #:fail-when (comp-reserved? #'constructor)
            (format "Name reserved for the component language ~a" (syntax-e #'constructor))
-           #:attr value 
+           #:attr value
            (with-orig-stx (Variant #'constructor (list->vector (attribute cs.value)))
                           #`(Variant 'constructor (vector #,@(map with-orig-stx-core (attribute cs.value))))
                           #'orig-stx)))
@@ -734,7 +738,7 @@ TODO?: Add binding arrows using DrRacket's API
                                        #'orig-stx))
 
   ;;; Generic expressions
-  
+
   (pattern (~and orig-stx (If ~! g-e t-e e-e))
            #:do [(define tag (fxior (pesi g-e.value)
                                     (fxior (pesi t-e.value)
@@ -753,7 +757,7 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr value
            (with-orig-stx (Let tag (attribute bscs.value) (attribute body.value))
                           #`(Let #,tag
-                                 #,(map with-orig-stx-core (attribute bscs.value))
+                                 (list . #,(map with-orig-stx-core (attribute bscs.value)))
                                  #,(with-orig-stx-core (attribute body.value)))
                           #'orig-stx))
   (pattern (~and orig-stx (Equal ~! l-e r-e))
@@ -1040,7 +1044,7 @@ TODO?: Add binding arrows using DrRacket's API
                 [rss (in-list refining-spaces*)])
              (with-syntax ([(rs ...) rss])
               #`(free-id-table-set #,tstx #'#,c (list #'rs ...)))))
-         
+
          #`(begin-for-syntax
             (free-id-table-set!
              language-info
@@ -1063,13 +1067,10 @@ TODO?: Add binding arrows using DrRacket's API
 
 (define-syntax (reify-metafunctions-of stx)
   (syntax-parse stx
-    [(_ i:id)
-     #:do [(define langv (free-id-table-ref language-info #'i -unmapped))]
-     #:fail-unless (Language? langv)
-     (format "Not associated with language info: ~a" (syntax-e #'i))
+    [(_ L:Lang)
      (define rev-vks
        (for/fold ([acc '()])
-           ([(name mf) (in-free-id-table (free-id-table-ref language-meta-functions #'i))])
+           ([(name mf) (in-free-id-table (free-id-table-ref language-meta-functions #'L.id))])
          (list* (with-orig-stx-core mf) #`'#,name acc)))
      #`(hash #,@(reverse rev-vks))]))
 
@@ -1143,7 +1144,7 @@ TODO?: Add binding arrows using DrRacket's API
                    [ns (in-list (attribute bscs.new-scope))])
           (syntax-parse rhs-stx
             [(~var rhs (Pattern langv #f #f ns pun-space?)) (attribute rhs.value)])))
-      
+
       (define-values (rev-rules si)
         (for/fold ([rev-rules '()] [overall-si pure])
             ([l (in-list (attribute lhs.value))]
@@ -1169,28 +1170,28 @@ TODO?: Add binding arrows using DrRacket's API
             si))
       (quasitemplate
        (with-orig-stx
-        (Meta-function #'mf-name
-                       (list . #,(reverse rev-rules))
-                       ;; collect up the store interactions given by the syntax.
-                       #,trusted-si
-                       (?? conc #f)
-                       (?? abs #f))
-        (syntax
-         (Meta-function 'mf-name
-                        (list .
-                              #,(for/list ([l (in-list (attribute lhs.value))]
-                                           [r (in-list rhss)]
-                                           [bsc (in-list (attribute bscs.value))]
-                                           [si (in-list (attribute bscs.interaction))])
-                                  #`(Rule #f
-                                          #,(with-orig-stx-core l)
-                                          #,(with-orig-stx-core r)
-                                          (list . #,(map with-orig-stx-core bsc))
-                                          #,si)))
+         (Meta-function #'mf-name
+                        (list . #,(reverse rev-rules))
+                        ;; collect up the store interactions given by the syntax.
                         #,trusted-si
                         (?? conc #f)
-                        (?? abs #f)))
-        #'#,stx))])))
+                        (?? abs #f))
+         (syntax
+          (Meta-function 'mf-name
+                         (list .
+                               #,(for/list ([l (in-list (attribute lhs.value))]
+                                            [r (in-list rhss)]
+                                            [bsc (in-list (attribute bscs.value))]
+                                            [si (in-list (attribute bscs.interaction))])
+                                   #`(Rule #f
+                                           #,(with-orig-stx-core l)
+                                           #,(with-orig-stx-core r)
+                                           (list . #,(map with-orig-stx-core bsc))
+                                           #,si)))
+                         #,trusted-si
+                         (?? conc #f)
+                         (?? abs #f)))
+         #'#,stx))])))
 
 ;; Set up the environment that says which meta-functions are in scope.
 (define-syntax (define-metafunctions stx)
@@ -1205,6 +1206,7 @@ TODO?: Add binding arrows using DrRacket's API
         (let ([other-mfs (free-id-table-ref language-meta-functions #'L)])
           #,@(for/list ([name (in-list (attribute mf-name))]
                         [mf (in-list (attribute mfs))])
-               #`(free-id-table-set! other-mfs #'#,name
-                                     #,(parse-meta-function mf Ξ (attribute L.langv)
-                                                            (syntax? (attribute pun-space)))))))]))
+               #`(free-id-table-set!
+                  other-mfs #'#,name
+                  #,(parse-meta-function mf Ξ (attribute L.langv)
+                                         (syntax? (attribute pun-space)))))))]))

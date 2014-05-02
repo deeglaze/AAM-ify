@@ -59,7 +59,10 @@
   [Kont (Mt Permission-map) (Kcons Frame Permission-map Kont)]
   [States (State With-env Kont)]
   [OK-args (RK Permissions Kont)]
-  [Pre-image-args (PI Permission-map GD)])
+  [Pre-image-args (PI Permission-map GD)]
+  [Bar-R-args (BR Permissions Permission-map)]
+  [Set-m-args (SM Permission-map Kont)]
+  [Grant-R-args (GR Permissions Permission-map)])
 
 (define-metafunctions CM-L
   (Pre-image
@@ -73,6 +76,28 @@
   (Marks-of
    [(Mt m) m]
    [(Kcons _ m _) m])
+
+  (Set-marks
+   [(SM m (Mt _)) (Mt m)]
+   [(SM m (Kcons φ _ κ)) (Kcons φ m κ)])
+
+  (Grant-perms
+   [(GR R m) m
+    (when (Set-empty? R))]
+   [(GR (Set-with p R) m) m*
+    (where m* (Let [(where m* (Grant-perms (GR R m)))]
+                   (Map-extend m* p (Term (Grant)))))])
+
+  ;; Every mapped permission not in R is set to deny.
+  ;; Others are unchanged.
+  (Bar-R
+   [(BR R m) m
+    (when (Map-empty? m))]
+   [(BR R (Map-with m p gd)) m**
+    (where m** (Let [(where m* (Bar-R (BR R m)))]
+                  (Map-extend m* p (If (In-Set? R p)
+                                       gd
+                                       (Term (Deny))))))])
 
   (OK 
    [(RK r (Mt m)) allow
@@ -101,7 +126,29 @@
          (State (Closure e ρ*) κ)
          (where a (MAlloc bindings))
          (where ρ* (Map-extend ρ x a))
-         (update a v)]))
+         (update a v)]
+
+    [--> #:name framing
+         (State (Closure (Frame R e) ρ) κ)
+         (State (Closure e ρ) κ*)
+         (where κ* (Let [(where m (Marks-of κ))
+                         (where m* (Bar-R (BR R m)))]
+                        (Set-marks (SM m* κ))))]
+    [--> #:name grant
+         (State (Closure (Grant R e) ρ) κ)
+         (State (Closure e ρ) κ*)
+         (where κ* (Let [(where m (Marks-of κ))
+                         (where m* (Grant-perms (GR R m)))]
+                        (Set-marks (SM m* κ))))]
+    [--> #:name test-permissions
+         (State (Closure (Test R e₀ e₁) ρ) κ)
+         (State (Closure e ρ) κ)
+         (where e (If (OK (RK R κ))
+                      e₀
+                      e₁))]
+    [--> (State (Closure (Fail) ρ) κ)
+         (State (Closure (Fail) ρ) (Mt e))
+         (where e (Empty-map #:concrete))]))
 
 (define-unit CM-machine@
   (import)
@@ -111,4 +158,5 @@
 
   (define trace-update #f)
   (define alloc #f)
-  (define Ξ (reify-metafunctions-of CM-L)))
+  (define Ξ (reify-metafunctions-of CM-L))
+  (printf "Damn~%"))
