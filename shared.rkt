@@ -57,7 +57,8 @@ Utility functions and specific functions that are shared between concrete and ab
     [(variant var pats) (variant var (for/vector #:length (vector-length pats)
                                                  ([pat (in-vector pats)])
                                           (pattern-eval pat ρ)))]
-    [(Bvar _ _) (error 'pattern-eval "Cannot eval a binding pattern ~a" pat)]
+    [(or (? Name?) (? Space?) (? Map-with?) (? Set-with?))
+     (error 'pattern-eval "Cannot eval a binding pattern ~a" pat)]
     [atom atom]))
 
 (define ((apply-reduction-relation rule-eval rules) term)

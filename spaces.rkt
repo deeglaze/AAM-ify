@@ -126,14 +126,15 @@ Allow stores (special)
 (struct Rule (name lhs rhs binding-side-conditions store-interaction) #:transparent)
 
 ;; A Pattern is one of
-;; - a (Bvar Symbol Option[Space-name])
+;; - a (Space Space)
+;; - a (Name Symbol Pattern)
 ;; - an (Rvar Symbol)
 ;; - a (variant Variant Immutable-Vector[Pattern]) [morally]
 ;; - a (Set-with Pattern Pattern Match-mode) [for structural termination arguments]
 ;; - a (Sap-with QMap Pattern Pattern Pattern Match-mode) [for structural termination arguments]
 ;;   XXX: how to handle May-present entries?
 ;; - an atom
-;; Bvar patterns bind on the left if not already mapped.
+;; Name patterns bind on the left if not already mapped.
 ;; If mapped, an equality check occurs before matching continues.
 ;; If a Space name is specified, matching ensures the value fits in the space expected.
 ;; An Rvar refers to a pattern variable in scope.
@@ -146,7 +147,8 @@ Allow stores (special)
 ;; - 'any {anything that completely matches, regardless of quality}
 ;; - 'all {all matches}
 ;; - 'best {a match with the highest quality possible with the patterns}
-(struct Bvar (x Space) #:transparent)
+(struct Name (x pat) #:transparent)
+(struct Space (space) #:transparent)
 (struct Map-with (kp vp mp mode) #:transparent)
 (struct Set-with (vp sp mode) #:transparent)
 (struct Rvar (x) #:transparent)
@@ -159,7 +161,7 @@ Allow stores (special)
 (define D∅ (discrete-set ∅))
 (define Aρ₀ (abstract-ffun ρ₀))
 (define Dρ₀ (discrete-ffun ρ₀))
-(define (Avar x) (Bvar x #f))
+(define (Avar x) (Name x -Anything))
 
 ;; A DPattern (or "data pattern") is either
 ;; - an atom

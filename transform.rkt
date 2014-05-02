@@ -25,8 +25,7 @@ The key ideas:
          "parser.rkt"
          (for-syntax syntax/parse))
 (provide abstract-language abstract-rule
-         transform-semantics
-         alloc-skeleton)
+         transform-semantics)
 
 ;; language->graph : Language → unweighted-directed-graph
 (define (language-spaces->graph spaces)
@@ -380,19 +379,19 @@ The key ideas:
 
 ;; Any deep pattern that recurs through an address gets turned into a non-deterministic match.
 ;; That is, if we have a pattern (say Pat) in a recursive position,
-;;  - we create a fresh Bvar (say B) and
+;;  - we create a fresh Name (say B) and
 ;;  - add a binding to the rule (Binding Pat (Choose (Store-lookup (Term (Rvar B)))))
 ;;  - Repeat the process for Pat.
 (define (emit-binding-sc rec-addrs pat)
   (define new-bvar (gensym))
   (if (variant? pat)
       (let-values ([(pat* binding-scs si) (flatten-pattern rec-addrs pat '() #f)])
-        (values (Bvar new-bvar (Address-Space 'AAM))
+        (values (Name new-bvar (Space (Address-Space 'AAM)))
                 (cons (Binding pat* (Choose read/many (gensym)
                                             (Store-lookup reads (Term pure (Rvar new-bvar)))))
                       binding-scs)
                 (fxior si read/many)))
-      (values (Bvar new-bvar (Address-Space 'AAM))
+      (values (Name new-bvar (Space (Address-Space 'AAM)))
               (list (Binding pat (Choose read/many (gensym)
                                          (Store-lookup reads (Term pure (Rvar new-bvar))))))
               read/many)))
@@ -430,7 +429,14 @@ The key ideas:
                     (reverse binding-scs*)
                     si*)]
 
+           [(Name x pat)
+            (define-values (pat* bscs* si*) (flatten-pattern rec-addrs pat rev-addr rec-positions))
+            (values (Name x pat*) bscs* si*)]
+
+           ;; FIXME: recursive addresses assume only variants, but now we have recursive maps.
            [(Map-with kpat vpat mpat mode)
+            (define-values (kpat* kbscs* ksi*)
+              (flatten-pattern rec-addrs kpat (cons 'domain rev-addr) rec-positions))
             (error 'flatten-pattern "TODO map-with")]
            [(Set-with vpat spat mode)
             (error 'flatten-pattern "TODO set-with")]
@@ -463,7 +469,7 @@ The key ideas:
               (fxior susi write/alloc))]
      [else
       (match tm
-        [(or (? Bvar?) (? Map-with?) (? Set-with?))
+        [(or (? Space?) (? Name?) (? Map-with?) (? Set-with?))
          (error 'abstract-rule "Rule RHS may not bind or match ~a" tm)]
         [(variant (and v (Variant name _)) pats)
          ;; TODO?: error/warn if space defining vname is trusted.
@@ -815,7 +821,7 @@ The key ideas:
                  (for/list ([rule (in-list red)])
                    (abstract-rule abs-lang rec-addrs ΞΔ* rule)))))]))
 
-;; FIXME: the output store-interactions are wrong.
+;; FIXME: some output store-interactions are wrong.
 (define (abstract-expression* rec-addrs ΞΔ expr rev-addr)
   (define bind (bind* rec-addrs ΞΔ))
   (let recur ([expr expr] [rev-addr rev-addr])
@@ -966,86 +972,5 @@ The key ideas:
       expr]
      [_ (error 'abstract-expression "Bad expression ~a" expr)])))
 
-;; Each allocation expression should be qualified with a distinct "hint" for
-;; where the allocation is happening. Using the hint as the address itself is
-;; too coarse, since every binding in the CESK machine would alias each other.
-;; We need an additional piece of information to distinguish addresses based
-;; on what is driving allocation, and not just where the allocation is taking place.
-
-;; We can't use any component of ς blindly, since they can contain addresses,
-;; which leads to a recursive address space, which leads to non-termination.
-;; Instead, ???
-;; alloc-skeleton : List[Rule] Map[MF-Name,Meta-function] → (values Alloc-Fn Syntax)
-(define (alloc-skeleton abs-rules abs-Ξ)
-  (values (λ (ς ρ [hint #f]) hint)
-          #`(λ (ς ρ hint)
-               (match-define (Abs-State term σ μ) ς)
-               (match hint
-                 #,@(alloc-hints abs-rules)
-                 #,@(for*/list ([mf (in-dict-values abs-Ξ)]
-                                #:unless (Meta-function-trusted-implementation/abs mf)
-                                [hint (in-list (alloc-hints (Meta-function-rules)))])
-                      hint)))))
-
-;; Create all the clauses for a user to fill in with better hints than the hint themselves.
-(define (alloc-hints rules)
-  (for/list ([hint (in-list (rules-hints rules))])
-    ;; quoted hint is the local variable introduced by alloc-skeleton.
-    #`[(quasiquote #,(addr->syntax hint)) hint]))
-
-(define (addr->syntax lst)
-  (match lst
-    ['() '()]
-    [(cons (or (? symbol? s) (? pair? s)) lst)
-     (cons s (addr->syntax lst))]
-    [(cons (Variant-field name idx) lst)
-     (cons #`(unquote (Variant-field (quote #,name) #,idx)) (addr->syntax lst))]))
-
-(define (rules-hints rules)
-  (hint-map (λ (rule tail)
-               (match-define (Rule name lhs rhs bscs si) rule)
-               (bscs-hints bscs tail))
-            rules '()))
-
-(define (hint-map f lst tail)
-  (match lst
-    ['() tail]
-    [(cons a lst) (f a (hint-map f lst tail))]))
-
-(define (bscs-hints bscs tail) (hint-map bsc-hints bscs tail))
-
-(define (bsc-hints bsc tail)
-  (match bsc
-    [(or (Binding _ expr) (When expr)) (expression-hints expr tail)]
-    [(Store-extend kexpr vexpr _) (expression-hints kexpr (expression-hints vexpr tail))]))
-
-(define (expression-hints expr tail)
-  (match expr
-    [(or (Choose _ _ expr)
-         (Store-lookup _ expr)
-         (In-Dom? _ _ expr)
-         (Set-empty? _ expr))
-     (expression-hints expr tail)]
-    [(or (? SAlloc?) (? MAlloc?))
-     (error 'expression-hints "Unqualified allocation ~a" expr)]
-    [(or (QSAlloc _ _ hint) (QMAlloc _ _ hint)) (cons hint tail)]
-    [(or (Equal _ expr0 expr1)
-         (Map-lookup _ _ expr0 _ expr1)
-         (Map-extend _ _ expr0 expr1 _)
-         (In-Set? _ expr0 expr1))
-     (expression-hints expr0 (if expr1 (expression-hints expr1 tail) tail))]
-    [(If _ g t e)
-     (expression-hints g (expression-hints t (expression-hints e tail)))]
-    [(Let _ bscs bexpr)
-     (bscs-hints bscs (expression-hints bexpr tail))]
-    [(Set-Union _ exprs)
-     (hint-map expression-hints exprs tail)]
-    [(or (Set-Add* _ expr exprs)
-         (Set-Remove* _ expr exprs)
-         (Set-Subtract _ expr exprs)
-         (Set-Intersect _ expr exprs))
-     (expression-hints expr (hint-map expression-hints exprs tail))]
-    [(or (? Term?) (? Empty-set?) (? Boolean?) (? Meta-function-call?)) tail]
-    [_ (error 'expression-hints "Unhandled expression ~a" expr)]))
 
 ;; [1] Might and Shivers ICFP 2006 "Improving flow analyses via ΓCFA: Abstract garbage collection and counting"

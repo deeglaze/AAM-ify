@@ -41,17 +41,25 @@
     ;; inner returns the certainty of the match and the updated map.
     (define (inner pattern data ρ)
       (match* (pattern data)
-        [((Bvar x Space) d)
+        [((Space space-name) d)
+         (and (in-space? L Space d)
+              ρ)]
+
+        [((Name x pat) d)
          (match (hash-ref ρ x -unmapped)
            [(== -unmapped eq?)
-            (define (do-update) (hash-set ρ x d))
-            (cond
-             [Space ;; Space provided ⇒ check if in space.
-              (if (in-space? L Space d)
-                  (do-update)
-                  #f)]
-             [else (do-update)])]
-           [other (quality->match (a/equal? other d store-spaces μ) ρ)])]
+            (for/fold ([result #f]) ([dρ (in-match-results (inner pat d ρ))])
+             (match-⊔
+              result
+              (match dρ
+                [(May ρ) (May (hash-set ρ x d))]
+                [ρ (hash-set ρ x d)])))]
+           [other
+            (match (a/equal? other d store-spaces μ)
+              [#f #f]
+              [b♯ (define may? (eq? b♯ 'b.⊤))
+                  (for/fold ([result #f]) ([dρ (in-match-results (inner pat d ρ))])
+                    (match-⊔ result (quality-⊔ may? dρ)))])])]
 
         [((variant (Variant name _) comps) (variant (Variant name _) data))
          (define len (min (vector-length comps) (vector-length data)))

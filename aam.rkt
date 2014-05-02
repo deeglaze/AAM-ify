@@ -27,10 +27,10 @@
          (State (Closure (App e₀ e₁) ρ) κ)
          (State (Closure e₀ ρ) (Kcons (Ar e₁ ρ) κ))]
     [--> #:name argument-eval
-         (State (Bvar v Value) (Kcons (Ar e ρ) κ))
+         (State (Name v Value) (Kcons (Ar e ρ) κ))
          (State (Closure e ρ) (Kcons (Fn v) κ))]
     [--> #:name function-eval
-         (State (Bvar v Value) (Kcons (Fn (Closure (Lam x e) ρ)) κ))
+         (State (Name v Value) (Kcons (Fn (Closure (Lam x e) ρ)) κ))
          (State (Closure e ρ*) κ)
          (where a (MAlloc bindings))
          (where ρ* (Map-extend ρ x a))
@@ -53,31 +53,55 @@
   [Pre-value (Lam Variable Expr) #:trust-recursion]
   [With-env (Closure Expr Env)]
   [Value (Closure Pre-value Env)]
+  #:refinement ([Closure (Value With-env)])
   [Frame (Ar Expr Env) (Fn Value)]
   [Permission-map (Map Permission GD)]
   [Kont (Mt Permission-map) (Kcons Frame Permission-map Kont)]
   [States (State With-env Kont)]
   [OK-args (RK Permissions Kont)]
   [Pre-image-args (PI Permission-map GD)])
-(begin-for-syntax (printf "Blorg"))
 
 (define-metafunctions CM-L
   (Pre-image
    [(PI m v) es
     (when (Map-empty? m))
     (where es (Empty-set #:abstraction-of (Term m)))]
-   [(PI (Map-with m k v) v)
+   [(PI (Map-with k v m) v)
     s
     (where s (Set-Add* (Pre-image (PI m v)) k))])
+
+  (Marks-of
+   [(Mt m) m]
+   [(Kcons _ m _) m])
 
   (OK 
    [(RK r (Mt m)) allow
     (where allow (Set-empty? (Set-Intersect r (Pre-image (PI m (Deny))))))]
    [(RK r (Kcons _ m k)) allow
     (where allow (If (Set-empty? (Set-Intersect r (Pre-image (PI m (Deny)))))
-                     (Let ([where r* (Set-Subtract r (Pre-image (PI m (Grant))))])
+                     (Let [(where r* (Set-Subtract r (Pre-image (PI m (Grant)))))]
                           (OK (RK r* k)))
                      #f))]))
+
+(define CM-R
+  (reduction-relation CM-L #:pun-space-names
+    [--> #:name variable-lookup
+         (State (Closure (Ref x) ρ) κ)
+         (State v κ)
+         (where v (Store-lookup (Map-lookup ρ x)))]
+    [--> #:name application
+         (State (Closure (App e₀ e₁) ρ) κ)
+         (State (Closure e₀ ρ) (Kcons (Ar e₁ ρ) m κ))
+         (where m (Marks-of κ))]
+    [--> #:name argument-eval
+         (State (Name v Value) (Kcons (Ar e ρ) m κ))
+         (State (Closure e ρ) (Kcons (Fn v) m κ))]
+    [--> #:name function-eval
+         (State (Name v Value) (Kcons (Fn (Closure (Lam x e) ρ)) m κ))
+         (State (Closure e ρ*) κ)
+         (where a (MAlloc bindings))
+         (where ρ* (Map-extend ρ x a))
+         (update a v)]))
 
 (define-unit CM-machine@
   (import)

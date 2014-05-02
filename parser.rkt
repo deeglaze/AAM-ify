@@ -73,15 +73,17 @@ TODO?: Add binding arrows using DrRacket's API
     [_ (error 'quine-space "Bad wos ~a" space)]))
 
  ;;; FIXME: ensure type aliases don't cycle and make this diverge.
- (define (resolve-space spaces space)
-   (match space
-     [(with-orig-stx v _ _)
-      (match v
-        [(Space-reference id) (resolve-space spaces (free-id-table-ref spaces id))]
-        [(or (? User-Space?) (? External-Space?) (? Address-Space?)) space]
-        ;; non-reference components are unchecked.
-        [_ #f])]
-     [#f #f]))
+ (define (resolve-space spaces space fuel)
+   (if (eq? 0 fuel)
+       (raise-syntax-error #f "Circular space alias" space)
+       (match space
+         [(with-orig-stx v _ _)
+          (match v
+            [(Space-reference id) (resolve-space spaces (free-id-table-ref spaces id) (sub1 fuel))]
+            [(or (? User-Space?) (? External-Space?) (? Address-Space?)) space]
+            ;; non-reference components are unchecked.
+            [_ #f])]
+         [#f #f])))
 
  ;; Parsed values are comprised of syntax objects.
  (define (quine-pattern pat)
@@ -93,8 +95,8 @@ TODO?: Add binding arrows using DrRacket's API
            (list* (quine-pattern v) (quine-pattern k) kvs))))
       (define v*
         (match v
-          [(Bvar id space)
-           #`(Bvar #'#,id #,(and space (quine-space space)))]
+          [(Name id pat)
+           #`(Name #'#,id #,(quine-pattern pat))]
           [(Rvar id)
            #`(with-orig-stx (Rvar #'#,id) #'#,core #'#,stx)]
           [(variant var pats)
@@ -290,7 +292,8 @@ TODO?: Add binding arrows using DrRacket's API
    (Address-Space ℘ Setof Map Any))
 
 (define-literal-set pat-ids
-  (Bvar
+  (Name
+   Space
    Rvar
    variant
    Map-with
@@ -303,7 +306,7 @@ TODO?: Add binding arrows using DrRacket's API
 ;; Otherwise, we find the most suitable Variant in the language. If multiple Variant values
 ;; match, we choose the most general one according to the user's specification of a refinement order.
 ;; If there is no given order, we raise an error.
-(define (find-suitable-variant L orig-stx expected-space vname pats pattern? bound-vars)
+(define (find-suitable-variant L orig-stx expected-space vname pats pattern? bound-vars pun-space?)
   (define (check-space s [on-fail (λ () (values #f #f #f))])
     (match s
       [(User-Space v-or-cs _ _)
@@ -316,7 +319,8 @@ TODO?: Add binding arrows using DrRacket's API
                         core _))
                   v-or-cs)
             (syntax-parse pats
-              [(~var ps (Patterns L (vector->list (Variant-Components v)) pattern? bound-vars))
+              [(~var ps (Patterns L (vector->list (Variant-Components v)) pattern? bound-vars
+                                  pun-space?))
                (values
                 (with-orig-stx (variant v/orig (list->vector (attribute ps.values)))
                                #`(variant #,core
@@ -378,7 +382,7 @@ TODO?: Add binding arrows using DrRacket's API
           (raise-syntax-error #f "Variant did not match language" orig-stx))
         (values best best-new-scope best-non-linear?)]))]))
 
-(define-syntax-class (Patterns L expected-spaces/components pattern? bound-vars)
+(define-syntax-class (Patterns L expected-spaces/components pattern? bound-vars pun-space?)
   #:attributes (values non-linear? new-scope)
   (pattern ()
            #:fail-unless (null? expected-spaces/components) 
@@ -388,11 +392,12 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr new-scope bound-vars)
   (pattern ((~var p (Pattern L (and (not pattern?) ;; FIXME: what about the pattern case?
                                     (car expected-spaces/components))
-                             pattern? bound-vars))
+                             pattern? bound-vars pun-space?))
             .
             (~var ps (Patterns L (cdr expected-spaces/components)
                                pattern?
-                               (attribute p.new-scope))))
+                               (attribute p.new-scope)
+                               pun-space?)))
            #:attr values (cons (attribute p.value) (attribute ps.values))
            #:attr non-linear? (or (attribute p.non-linear?) (attribute ps.non-linear?))
            #:attr new-scope (attribute ps.new-scope)))
@@ -408,12 +413,11 @@ TODO?: Add binding arrows using DrRacket's API
   (pattern #:best #:attr mode 'best)
   (pattern (~seq) #:attr mode #f))
 
-;; Patterns and terms are similar. Rvars are allowed in terms, Bvars in patterns.
-(define-syntax-class (Pattern L expected-space/component pattern? bound-vars)
+;; Patterns and terms are similar. Rvars are allowed in terms, Name/Space in patterns.
+(define-syntax-class (Pattern L expected-space/component pattern? bound-vars pun-space?)
   #:literal-sets (pat-ids)
   #:attributes (value non-linear? new-scope)
-  (pattern (Bvar v:id (~optional (~var S (Space-ref L))))
-           #:fail-unless pattern? "Terms may not use Bvar. Not in binding context."
+  (pattern (~and orig-stx (Space (~var S (Space-ref L))))
            #:fail-unless (implies (attribute S.value)
                                   (expectations-agree?
                                    L
@@ -422,15 +426,24 @@ TODO?: Add binding arrows using DrRacket's API
            (format "Expected space ~a but binder expects ~a"
                    expected-space/component
                    (attribute S.value))
+           #:attr value (with-orig-stx (Space (attribute S.value))
+                                       #`(Space #,(with-orig-stx-core (attribute S.value)))
+                                       #'orig-stx)
+           #:attr non-linear? #f
+           #:attr new-scope bound-vars)
+  (pattern (~and orig-stx
+                 (Name v:id (~var p (Pattern L expected-space/component #t bound-vars pun-space?))))
+           #:fail-unless pattern? "Terms may not use Name. Not in binding context."
+           
            #:attr value (with-orig-stx
-                         (Bvar #'v (attribute S.value))
-                         #`(Bvar 'v #,(and (attribute S)
-                                           (with-orig-stx-core (attribute S.value))))
+                         (Name #'v (attribute p.value))
+                         #`(Name 'v #,(with-orig-stx-core (attribute p.value)))
                          #'orig-stx)
-           #:attr non-linear? (free-id-table-has-key? bound-vars #'v)
-           #:attr new-scope (free-id-table-set bound-vars #'v #t))
+           #:attr non-linear? (or (attribute p.non-linear?)
+                                  (free-id-table-has-key? bound-vars #'v))
+           #:attr new-scope (free-id-table-set (attribute p.new-scope) #'v #t))
   (pattern (~and orig-stx (Rvar v:id))
-           #:fail-when pattern? "Patterns may not use Rvar. Use Bvar for non-linear patterns"
+           #:fail-when pattern? "Patterns may not use Rvar. Use Name for non-linear patterns"
            #:attr value (with-orig-stx (Rvar #'v)
                                        #'(Rvar 'v)
                                        #'orig-stx)
@@ -439,9 +452,9 @@ TODO?: Add binding arrows using DrRacket's API
 
   (pattern (~and orig-stx (Map-with ~! (~fail #:unless pattern?
                                               "Map-with for use only in pattern position")
-                                    (~var k (Pattern L #f #t bound-vars))
-                                    (~var v (Pattern L #f #t (attribute k.new-scope)))
-                                    (~var m (Pattern L #f #t (attribute v.new-scope)))
+                                    (~var k (Pattern L #f #t bound-vars pun-space?))
+                                    (~var v (Pattern L #f #t (attribute k.new-scope) pun-space?))
+                                    (~var m (Pattern L #f #t (attribute v.new-scope) pun-space?))
                                     mode:match-mode))
            #:attr value (with-orig-stx
                          (Map-with (attribute k.value)
@@ -461,8 +474,8 @@ TODO?: Add binding arrows using DrRacket's API
 
   (pattern (~and orig-stx (Set-with ~! (~fail #:unless pattern?
                                               "Set-with for use only in pattern position")
-                                    (~var v (Pattern L #f #t bound-vars))
-                                    (~var s (Pattern L #f #t (attribute v.new-scope)))
+                                    (~var v (Pattern L #f #t bound-vars pun-space?))
+                                    (~var s (Pattern L #f #t (attribute v.new-scope) pun-space?))
                                     mode:match-mode))
            #:attr value (with-orig-stx
                          (Set-with (attribute v.value)
@@ -477,7 +490,8 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr new-scope (attribute s.new-scope))
 
   (pattern (~and orig-stx ((~optional variant) vname:id ps:expr ...))
-           #:do [(define es (resolve-space (Language-spaces L) expected-space/component))]
+           #:do [(define es (resolve-space (Language-spaces L) expected-space/component
+                                           (dict-count (Language-spaces L))))]
            #:fail-when (and es
                             (not (User-Space? (with-orig-stx-v es))))
            "Expected non-user space. Got a variant."
@@ -487,14 +501,30 @@ TODO?: Add binding arrows using DrRacket's API
                                           #'vname
                                           (syntax->list #'(ps ...))
                                           pattern?
-                                          bound-vars))]
+                                          bound-vars
+                                          pun-space?))]
            #:attr value var
            #:attr non-linear? found-non-linear?
            #:attr new-scope found-new-scope)
 
   (pattern v:id
+           #:do [(define the-space
+                   (and pun-space?
+                        ;; not shadowed by an explicit name?
+                        (not (free-id-table-has-key? bound-vars #'v))
+                        (free-id-table-ref (Language-spaces L) #'v #f)))]
+           #:fail-unless (or pattern? (free-id-table-has-key? bound-vars #'v))
+           (format "Unbound variable reference ~a" (syntax-e #'v))
            #:attr value (if pattern?
-                            (with-orig-stx (Bvar #'v #f) #`(Bvar 'v #f) #'v)
+                            (if the-space
+                                (with-orig-stx (Space the-space)
+                                               #`(Space #,(with-orig-stx-core the-space))
+                                               #'v)
+                                (with-orig-stx (Name #'v (with-orig-stx -Anything
+                                                                        #'-Anything
+                                                                        #'v))
+                                               #`(Name 'v -Anything)
+                                               #'v))
                             (with-orig-stx (Rvar #'v) #`(Rvar 'v) #'v))
            #:attr non-linear? (free-id-table-has-key? bound-vars #'v)
            #:attr new-scope (free-id-table-set bound-vars #'v #t)))
@@ -594,11 +624,11 @@ TODO?: Add binding arrows using DrRacket's API
 (define-syntax-rule (pesi p)
   (expression-store-interaction (with-orig-stx-v (attribute p))))
 
-(define-syntax-class (Expression L bound-vars Ξ)
+(define-syntax-class (Expression L bound-vars Ξ pun-space?)
   #:attributes (value)
   #:literal-sets (expr-ids)
-  #:local-conventions ([t (Pattern L #f #f bound-vars)]
-                       [#rx".*-e$" (Expression L bound-vars Ξ)])
+  #:local-conventions ([t (Pattern L #f #f bound-vars pun-space?)]
+                       [#rx".*-e$" (Expression L bound-vars Ξ pun-space?)])
   (pattern (~and orig-stx (Term t))
            #:attr value (with-orig-stx
                          (Term pure (attribute t.value))
@@ -716,8 +746,8 @@ TODO?: Add binding arrows using DrRacket's API
                                #,(with-orig-stx-core (attribute t-e.value))
                                #,(with-orig-stx-core (attribute e-e.value)))
                          #'orig-stx))
-  (pattern (~and orig-stx (Let ~! (~var bscs (Bindings L bound-vars Ξ))
-                               (~var body (Expression L (attribute bscs.new-scope) Ξ))))
+  (pattern (~and orig-stx (Let ~! (~var bscs (Bindings L bound-vars Ξ pun-space?))
+                               (~var body (Expression L (attribute bscs.new-scope) Ξ pun-space?))))
            #:do [(define tag (fxior (attribute bscs.interaction)
                                     (pesi body.value)))]
            #:attr value
@@ -882,14 +912,14 @@ TODO?: Add binding arrows using DrRacket's API
                                  #`(Term #,pure (Rvar 'v))
                                  #'v)))
 
-(define-syntax-class (BSC L bound-vars Ξ)
+(define-syntax-class (BSC L bound-vars Ξ pun-space?)
   #:attributes (value new-scope interaction)
   #:literals (where when update)
   #:description "A binding/side-condition/store-update"
   #:commit
-  #:local-conventions ([#rx".*-e$" (Expression L bound-vars Ξ)])
+  #:local-conventions ([#rx".*-e$" (Expression L bound-vars Ξ pun-space?)])
   (pattern (~and orig-stx (where ~!
-                                 (~var p (Pattern L #f #t bound-vars))
+                                 (~var p (Pattern L #f #t bound-vars pun-space?))
                                  let-e))
            #:attr value
            (with-orig-stx (Binding (attribute p.value) (attribute let-e.value))
@@ -923,15 +953,15 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr interaction
            (add-writes (fxior (pesi k-e.value) (pesi v-e.value)))))
 
-(define-syntax-class (Bindings L bound-vars Ξ)
+(define-syntax-class (Bindings L bound-vars Ξ pun-space?)
   #:attributes (new-scope value interaction)
   #:commit
   (pattern (~and orig-stx ()) #:attr new-scope bound-vars
            #:attr value '()
            #:attr interaction pure)
   (pattern (~and orig-stx
-                 ((~var bsc (BSC L bound-vars Ξ)) .
-                  (~var bscs (Bindings L (attribute bsc.new-scope) Ξ))))
+                 ((~var bsc (BSC L bound-vars Ξ pun-space?)) .
+                  (~var bscs (Bindings L (attribute bsc.new-scope) Ξ pun-space?))))
            #:attr value (cons (attribute bsc.value) (attribute bscs.value))
            #:attr new-scope (attribute bscs.new-scope)
            #:attr interaction (fxior (attribute bsc.interaction)
@@ -947,8 +977,8 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr langv v))
 
 (define (get-variant-in-space spaces c s)
-  (match (with-orig-stx-v (resolve-space spaces (free-id-table-ref spaces s)))
-    [(User-Space vars _ _)
+  (match (resolve-space spaces (free-id-table-ref spaces s) (dict-count spaces))
+    [(with-orig-stx (User-Space vars _ _) _ _)
      (for/or ([v-or-c (in-list vars)])
        (match (with-orig-stx-v v-or-c)
          [(Variant name _)
@@ -1047,19 +1077,21 @@ TODO?: Add binding arrows using DrRacket's API
   (syntax-parse stx
     #:literals (-->)
     [(_ lang:Lang ~!
+        (~optional (~and #:pun-space-names pun-space))
         (~do (define Ξ (free-id-table-ref language-meta-functions #'lang.id))
-             (define langv (attribute lang.langv)))
+             (define langv (attribute lang.langv))
+             (define pun-space? (syntax? (attribute pun-space))))
         [--> (~optional (~seq #:name name))
-             (~var lhs (Pattern langv #f #t (make-immutable-free-id-table))) ~!
+             (~var lhs (Pattern langv #f #t (make-immutable-free-id-table) pun-space?)) ~!
              rhs-raw ~!
              .
-             (~var bscs (Bindings langv (attribute lhs.new-scope) Ξ))]
+             (~var bscs (Bindings langv (attribute lhs.new-scope) Ξ pun-space?))]
         ...)
      (define rhss
        (for/list ([rhs (in-list (attribute rhs-raw))]
                   [bscsns (in-list (attribute bscs.new-scope))])
          (syntax-parse rhs
-           [(~var rhs (Pattern langv #f #f bscsns))
+           [(~var rhs (Pattern langv #f #f bscsns pun-space?))
             (attribute rhs.value)])))
      #`(list .
              #,(for/list ([l (in-list (attribute lhs.value))]
@@ -1083,7 +1115,7 @@ TODO?: Add binding arrows using DrRacket's API
              #:when (Variant? v-or-c))
      (free-identifier=? (Variant-name v-or-c) id)))
 
- (define (parse-meta-function stx Ξ L)
+ (define (parse-meta-function stx Ξ L pun-space?)
    (syntax-parse stx
      [(mf-name:id
        (~optional lang:Lang)
@@ -1094,10 +1126,10 @@ TODO?: Add binding arrows using DrRacket's API
                                                       (~optional (~and #:writes tr-writes))
                                                       (~optional (~and #:allocs tr-allocs))
                                                       (~optional (~and #:many tr-many))) ...))) ...
-       [(~var lhs (Pattern langv #f #t (make-immutable-free-id-table)))
+       [(~var lhs (Pattern langv #f #t (make-immutable-free-id-table) pun-space?))
         rhs-raw
         .
-        (~var bscs (Bindings langv (attribute lhs.new-scope) Ξ))]
+        (~var bscs (Bindings langv (attribute lhs.new-scope) Ξ pun-space?))]
        ...)
       ;; At this point, components won't show up, so we can overwrite those.
       #:fail-when (pat-reserved? #'mf-name)
@@ -1110,7 +1142,7 @@ TODO?: Add binding arrows using DrRacket's API
         (for/list ([rhs-stx (in-list (syntax->list #'(rhs-raw ...)))]
                    [ns (in-list (attribute bscs.new-scope))])
           (syntax-parse rhs-stx
-            [(~var rhs (Pattern langv #f #f ns)) (attribute rhs.value)])))
+            [(~var rhs (Pattern langv #f #f ns pun-space?)) (attribute rhs.value)])))
       
       (define-values (rev-rules si)
         (for/fold ([rev-rules '()] [overall-si pure])
@@ -1163,7 +1195,8 @@ TODO?: Add binding arrows using DrRacket's API
 ;; Set up the environment that says which meta-functions are in scope.
 (define-syntax (define-metafunctions stx)
   (syntax-parse stx
-    [(_ L:Lang (~and mfs (mf-name:id ~! . rest)) ...)
+    [(_ L:Lang (~optional (~and #:pun-space-names pun-space))
+        (~and mfs (mf-name:id ~! . rest)) ...)
      (define Ξ (make-free-id-table))
      (define other-mfs (free-id-table-ref language-meta-functions #'L))
      (for ([name (in-list (append (attribute mf-name) (dict-keys other-mfs)))])
@@ -1173,4 +1206,5 @@ TODO?: Add binding arrows using DrRacket's API
           #,@(for/list ([name (in-list (attribute mf-name))]
                         [mf (in-list (attribute mfs))])
                #`(free-id-table-set! other-mfs #'#,name
-                                     #,(parse-meta-function mf Ξ (attribute L.langv))))))]))
+                                     #,(parse-meta-function mf Ξ (attribute L.langv)
+                                                            (syntax? (attribute pun-space)))))))]))

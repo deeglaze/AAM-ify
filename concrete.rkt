@@ -25,23 +25,23 @@ in the spaces.rkt format.
 (define (c/match pattern data ρ store-spaces)
   (define (inner pattern data ρ)
     (match* (pattern data)
-      [((Bvar x Space) d)
+      [((Space space-name) d)
+       (cond
+        [(in-space? L space-name d) ρ]
+        [else
+         (log-info (format "space mismatch ~a ~a~%" space-name d))
+         #f])]
+
+      [((Name x pat) d)
        (match (dict-ref ρ x -unmapped)
          [(== -unmapped eq?)
-          (cond 
-           [Space
-            (cond
-             [(in-space? L Space d) (dict-set ρ x d)]
-             [else
-              (log-info (format "Bvar space mismatch ~a ~a~%" Space d))
-              #f])]
-           [else (dict-set ρ x d)])]
-         [other (cond
-                 [(equal? other d)
-                  ρ]
-                 [else
-                  (log-info (format "Match failure: non-linear binding mismatch ~a ~a" other d))
-                  #f])])]
+          (match (inner pat d ρ)
+            [#f #f]
+            [ρ (hash-set ρ x d)])]
+         [other (cond [(equal? other d)
+                       (match (inner pat d ρ)
+                         [#f #f]
+                         [ρ ])])])]
 
       [((variant v comps) (variant v* ds))
        (cond

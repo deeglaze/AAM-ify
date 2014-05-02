@@ -1,6 +1,6 @@
 #lang racket/base
 (require "spaces.rkt" "shared.rkt" "transform.rkt" "concrete.rkt" "abstract.rkt"
-         "signatures.rkt"
+         "signatures.rkt" "alloc-skeleton.rkt"
          (for-syntax syntax/parse racket/base)
          racket/unit
          racket/pretty racket/set racket/match)
