@@ -1,15 +1,56 @@
 #lang racket/base
 (require "parser.rkt" "shared.rkt" "spaces.rkt" "signatures.rkt"
-         "transform.rkt"
+         "concrete.rkt" "abstract.rkt"
+         "transform-syntax.rkt" "alloc-skeleton.rkt"
          racket/unit
+         racket/pretty
          (for-syntax racket/base))
+
+(define-language CEK
+  [Variable #:external-space symbol? #:cardinality (λ (e) 1) #:concrete]
+  [Env (Variable → Value)]
+  [Expr #:trust-recursion (Ref Variable) (App Expr Expr) Pre-value]
+  [Pre-value #:trust-recursion (Lam Variable Expr)]
+  [With-env (Closure Expr Env)]
+  [Value (Closure Pre-value Env)]
+  #:refinement ([Closure (Value With-env)])
+  [Frame (Ar Expr Env) (Fn Value)]
+  [Kont (Mt) (Kcons Frame Kont)]
+  [States (State With-env Kont)])
+
+(define CEK-R
+  (reduction-relation CEK #:pun-space-names
+    [--> #:name inject
+         (Name e (Space Expr))
+         (State (Closure e ρ₀) (Mt))
+         (where ρ₀ (Empty-map #:concrete))]
+    [--> #:name variable-lookup
+         (State (Closure (Ref x) ρ) κ)
+         (State v κ)
+         (where v (Map-lookup ρ x))]
+    [--> #:name application
+         (State (Closure (App e₀ e₁) ρ) κ)
+         (State (Closure e₀ ρ) (Kcons (Ar e₁ ρ) κ))]
+    [--> #:name argument-eval
+         (State (Name v Value) (Kcons (Ar e ρ) κ))
+         (State (Closure e ρ) (Kcons (Fn v) κ))]
+    [--> #:name function-eval
+         (State (Name v Value) (Kcons (Fn (Closure (Lam x e) ρ)) κ))
+         (State (Closure e ρ*) κ)
+         (where ρ* (Map-extend ρ x v))]))
+(define-values (CEK♯ CEK-Ξ♯ CEK-R♯)
+  (transform-semantics CEK CEK-R))
+(pretty-print CEK♯)
+(newline)
+(pretty-print (unparse-semantics CEK♯ CEK-R♯))
+
 
 (define-language CESK
   [BAddrs #:address-space bindings]
-  [Variable #:external-space symbol? #:cardinality (λ (e) 1)]
+  [Variable #:external-space symbol? #:cardinality (λ (e) 1) #:concrete]
   [Env (Variable → (Address-Space bindings))]
-  [Expr (Ref Variable) (App Expr Expr) Pre-value #:trust-recursion]
-  [Pre-value (Lam Variable Expr) #:trust-recursion]
+  [Expr #:trust-recursion (Ref Variable) (App Expr Expr) Pre-value]
+  [Pre-value #:trust-recursion (Lam Variable Expr)]
   [With-env (Closure Expr Env)]
   [Value (Closure Pre-value Env)]
   #:refinement ([Closure (Value With-env)])
@@ -18,7 +59,11 @@
   [States (State With-env Kont)])
 
 (define CESK-R
-  (reduction-relation CESK
+  (reduction-relation CESK #:pun-space-names
+    [--> #:name inject
+         (Name e (Space Expr))
+         (State (Closure e ρ₀) (Mt))
+         (where ρ₀ (Empty-map #:concrete))]
     [--> #:name variable-lookup
          (State (Closure (Ref x) ρ) κ)
          (State v κ)
@@ -35,22 +80,21 @@
          (where a (MAlloc bindings))
          (where ρ* (Map-extend ρ x a))
          (update a v)]))
-(define-values (CESK♯ CESK-R♯ CESK-Ξ♯)
+(define-values (CESK♯ CESK-Ξ♯ CESK-R♯)
   (transform-semantics CESK CESK-R))
 
 ;; Can't put this in define-unit since it does compile-time side-effects.
 (define-language CM-L
   [BAddrs #:address-space bindings]
-  [Variable #:external-space symbol? #:cardinality (λ (e) 1)]
-  [Permission #:external-space symbol? #:cardinality (λ (e) 1)]
+  [Variable #:external-space symbol? #:cardinality (λ (e) 1) #:concrete]
+  [Permission #:external-space symbol? #:cardinality (λ (e) 1) #:concrete]
   [Permissions (℘ Permission)]
   [GD (Deny) (Grant)]
-  [Expr (Ref Variable) (App Expr Expr) Pre-value (Fail)
+  [Expr #:trust-recursion (Ref Variable) (App Expr Expr) Pre-value (Fail)
         (Frame Permissions Expr) (Grant Permissions Expr)
-        (Test Permissions Expr Expr)
-        #:trust-recursion]
+        (Test Permissions Expr Expr)]
   [Env (Variable → (Address-Space bindings))]
-  [Pre-value (Lam Variable Expr) #:trust-recursion]
+  [Pre-value #:trust-recursion (Lam Variable Expr)]
   [With-env (Closure Expr Env)]
   [Value (Closure Pre-value Env)]
   #:refinement ([Closure (Value With-env)])
@@ -150,13 +194,82 @@
          (State (Closure (Fail) ρ) (Mt e))
          (where e (Empty-map #:concrete))]))
 
+(define-language Scheme
+  [BAddrs #:address-space bindings]
+  [Variable #:external-space symbol? #:cardinality (λ (e) 1) #:concrete]
+  [Number #:external-space number? #:cardinality (λ (e) 1) #:concrete]
+  [String #:external-space string? #:cardinality (λ (e) 1) #:concrete]
+  [Char #:external-space char? #:cardinality (λ (e) 1) #:concrete]
+  [Symbol #:external-space symbol? #:cardinality (λ (e) 1) #:concrete]
+  [Variable-List #:trust-recursion '() (VarCons Variable Variable-List)]
+  [Expr #:trust-recursion
+        (Ref Variable)
+        (App Expr Expr-List)
+        Pre-value
+        (Quote Literal)
+        (sIf Expr Expr Expr)
+        (sLet Let-Clauses Expr)
+        (sLetrec Let-Clauses Expr)
+        (Let/cc Variable Expr)
+        (Set! Variable Expr)
+        Primitive]
+  [Primitive-name ;; tag checks
+                  'pair?
+                  'null?
+                  'string?
+                  'procedure?
+                  'vector?
+                  'boolean?
+                  'symbol?
+                  ;; others
+                  'zero? '+ '- 'apply 'vector-length]
+  [Primitive (Prim Primitive-name)]
+  [Let-Clauses #:trust-recursion '() (LCcons Variable Expr Let-Clauses)]
+  [Expr-List #:trust-recursion '() (Econs Expr Expr-List)]
+  [Literal Number String Symbol Char #t #f '()]
+  [Env (Variable → BAddrs)]
+  [Pre-value #:trust-recursion
+             (Lam Variable-List Expr) (RLam Variable-List Variable Expr)]
+  [Value (Closure Pre-value Env)
+         Primitive
+         Literal
+         (Consv Value Value)
+         (Vector Number Value-List)]
+  [Value-List-Trusted #:trust-recursion #:trust-construction
+                      '() (VTcons Value Value-List-Trusted)]
+  [Value-List '() (Vcons Value Value-List)]
+  [Frame (Ev Expr-List Value-List-Trusted Env)
+         (kIf Expr Expr Env)
+         (kS! BAddrs)
+         (klt Variable Let-Clauses Value-List-Trusted Env)
+         (klc Let-Clauses Value-List-Trusted)]
+  [Kont (Mt) (Kcons Frame Kont)]
+  [States (Ev Expr Env Kont)
+          (Co Kont Value)
+          ;; "plain apply"
+          (Pa Variable-List Expr Env Value-List-Trusted Kont)
+          ;; "rest-arg apply"
+          (Ra Variable-List Variable Expr Env Value-List-Trusted Kont)])
+
 (define-unit CM-machine@
   (import)
   (export language-parms^)
 
   (define L (reify-language CM-L))
+  (define Ξ (reify-metafunctions-of CM-L))
 
   (define trace-update #f)
-  (define alloc #f)
-  (define Ξ (reify-metafunctions-of CM-L))
-  (printf "Damn~%"))
+  (define alloc #f))
+
+(define-unit abstract-CM-machine@
+  (import)
+  (export language-parms^)
+
+  (define-values (L Ξ R) (transform-semantics CM-L CM-R))
+
+  (alloc-skeleton L)
+
+  (define trace-update #f)
+  (define alloc #f))
+
+(define-values/invoke-unit/infer (link CM-machine@ concrete-semantics@))

@@ -37,7 +37,7 @@ The following tags have significance:
 
 ADDITIONAL FEATURES:
 -----
-* abstract counting for better equality matching
+* abstract counting for better equality matching [1]
 * "address spaces" divvy items amongst as many stores that get automatically added.
 * Addresses can be marked for pointer equality, or for equality to automatically dereference.
     * Addresses introduced by the AAM transformation are the latter kind, in the 'AAM address space.
@@ -66,3 +66,5 @@ SHOW-STOPPING FIXMEs:
 * We need to track positions where maps and sets flow, and what the expected spaces are,
   so we can mark them as abstract (with pointer to cardinality analysis) or not when
   constructing them.
+
+[1] Might and Shivers ICFP 2006 "Improving flow analyses via ΓCFA: Abstract garbage collection and counting"

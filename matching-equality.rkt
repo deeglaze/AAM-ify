@@ -23,7 +23,7 @@
     [#f #f]
     ['b.⊤ (May ρ)]))
 
-(define (⊔-quality may? ρ)
+(define (quality-⊔ may? ρ)
   (if (and may? (not (May? ρ)))
       (May ρ)
       ρ))
@@ -61,7 +61,7 @@
                   (for/fold ([result #f]) ([dρ (in-match-results (inner pat d ρ))])
                     (match-⊔ result (quality-⊔ may? dρ)))])])]
 
-        [((variant (Variant name _) comps) (variant (Variant name _) data))
+        [((variant (Variant name _ _ _) comps) (variant (Variant name _ _ _) data))
          (define len (min (vector-length comps) (vector-length data)))
          (let match-comps ([i 0] [ρ ρ] [quality #f])
            (cond
@@ -98,7 +98,7 @@
                   [may? (in-value (or (May? kdρ) (May? vdρ) (Abs-Data? M)))]
                   [m* (in-data M)]
                   [mdρ (in-match-results (inner mpat m* vρ))])
-               (⊔-quality may? mdρ))]
+               (quality-⊔ may? mdρ))]
 
             ['all
              (for*/fold ([results #f])
@@ -113,7 +113,7 @@
                   [may? (in-value (or (May? kdρ) (May? vdρ) (Abs-Data? M)))]
                   [m* (in-data M)]
                   [mdρ (in-match-results (inner mpat m* vρ))])
-               (match-⊔ results (⊔-quality may? mdρ)))]
+               (match-⊔ results (quality-⊔ may? mdρ)))]
 
             ['best
              (define-values (dummy best-ρ)
@@ -154,7 +154,7 @@
                   [may? (in-value (or (May? vdρ) (Abs-Data? s*)))]
                   [s* (in-data s*)]
                   [sdρ (in-match-results (inner spat s* vρ))])
-               (⊔-quality may? sdρ))]
+               (quality-⊔ may? sdρ))]
 
             ['all
              (for*/fold ([results #f])
@@ -166,7 +166,7 @@
                   [may? (in-value (or (May? vdρ) (Abs-Data? s*)))]
                   [s* (in-data s*)]
                   [sdρ (in-match-results (inner spat s* vρ))])
-               (match-⊔ results (⊔-quality may? sdρ)))]
+               (match-⊔ results (quality-⊔ may? sdρ)))]
 
             ['best
              (define-values (dummy best-ρ)
@@ -249,7 +249,7 @@
     (define (equal-step d₀ d₁)
       (match* (d₀ d₁)
         ;; We match on name instead of identity due to Variant refinements
-        [((variant (Variant name _) ds₀) (variant (Variant name _) ds₁))
+        [((variant (Variant name _ _ _) ds₀) (variant (Variant name _ _ _) ds₁))
          (for/b∧ ([d₀ (in-vector ds₀)]
                   [d₁ (in-vector ds₁)])
                  (a/equal? d₀ d₁))]

@@ -1,6 +1,7 @@
 #lang racket/base
 
-(require racket/set (for-syntax racket/base) racket/fixnum racket/list)
+(require racket/set (for-syntax racket/base) racket/fixnum racket/list
+         racket/match)
 (provide (all-defined-out))
 #|
 Allow spaces to be inductively defined or provided with the promise that they are finite
@@ -32,6 +33,7 @@ Allow stores (special)
 ;; - a (Map Component Component)
 ;; - a (℘ Component)
 ;; - (Anything)
+;; - an atom
 ;; The Anything variant is special. It stands for a /trusted/ "Any" pattern.
 
 ;; A Qualified-Component is a Component with QMaps instead of Maps.
@@ -57,7 +59,7 @@ Allow stores (special)
 (struct discrete-set (set) #:transparent)
 
 ;; TODO?: allow variants or components to have side-conditions
-(struct Variant (name Components) #:transparent)
+(struct Variant (name Components trust-recursion? trust-construction?) #:transparent)
 ;; Elements of Variant contain a pointer to the type of the variant.
 (struct variant (vpointer data) #:transparent)
 ;; Addresses specify which address space they are in, for store separation purposes.
@@ -201,7 +203,7 @@ Allow stores (special)
 ;; *** cardinality (00100b) *** REMOVED, since we don't know if we need to read through store.
 ;; - alloc       (00010b)
 ;; - many        (00001b)
-;; All encoded as a 5 bit number (fixnum)
+;; All encoded as a 4 bit number (fixnum)
 (define-values
   (pure many allocs alloc/many
    writes write/many write/alloc write/alloc/many
@@ -220,6 +222,20 @@ Allow stores (special)
 (define (add-many n) (fxior n many))
 
 (struct expression (store-interaction) #:transparent)
+
+(define (combine . es)
+  (let recur ([es es])
+    (match es
+      ['() pure]
+      [(cons e es)
+       (fxior (match e
+                [(or (expression si)
+                     (Meta-function _ _ si _ _)
+                     (Rule _ _ _ _ si)) si]
+                [(? fixnum?) e]
+                [else (error 'combine "Expected value with store-interaction or fixnum ~a" e)])
+              (recur es))])))
+
 ;; A Set-Container is one of
 ;; - values
 ;; - abstract-set
@@ -234,30 +250,31 @@ Allow stores (special)
 ;; An Expression is one of
 ;; - (Term Pattern)
 ;; - (Boolean Boolean)
-;; - (Map-lookup Symbol Expression Boolean Expression)
-;; - (Map-extend Symbol Expression Expression Boolean)
-;; - (Map-remove Symbol Expression)
-;; - (Empty-map (∪ Map-Container Expression))
-;; - (Map-empty? Symbol)
 ;; - (Store-lookup Expression)
 ;; - (If Expression Expression Expression)
 ;; - (Let List[Binding] Expression
 ;; - (Equal Expression Expression)
-;; - (In-Dom Symbol Expression)
-;; - (Empty-set (∪ Set-Container Expression))
-;; - (Set-Union List[Expression])
-;; - (Set-Add* Expression List[Expression])
-;; - (Set-Remove* Expression List[Expression])
-;; - (Set-Intersect List[Expression])
-;; - (Set-Subtract Expression List[Expression])
-;; - (Empty-set? Expression)
-;; - (In-Set? Expression Expression)
-;; and the possibly impure
 ;; - (Meta-function-call name Pattern)
 ;; - (SAlloc Symbol)
 ;; - (MAlloc Symbol)
 ;; - (QSAlloc Symbol _)
 ;; - (QMAlloc Symbol _)
+;; Map operations
+;; - (Map-lookup Symbol Expression Boolean Expression)
+;; - (Map-extend Symbol Expression Expression Boolean)
+;; - (Map-remove Symbol Expression)
+;; - (Empty-map (∪ Map-Container Expression))
+;; - (Map-empty? Symbol)
+;; - (In-Dom? Symbol Expression)
+;; Set operations
+;; - (Empty-set (∪ Set-Container Expression))
+;; - (Set-empty? Expression)
+;; - (In-Set? Expression Expression)
+;; - (Set-Union Expression List[Expression])
+;; - (Set-Add* Expression List[Expression])
+;; - (Set-Remove* Expression List[Expression])
+;; - (Set-Intersect Expression List[Expression])
+;; - (Set-Subtract Expression List[Expression])
 (struct Boolean expression (b) #:transparent)
 (struct Store-extend (key-expr val-expr trust-strong?) #:transparent)
 
@@ -265,6 +282,14 @@ Allow stores (special)
 ;; This only matters for maps that have addresses in their domains.
 
 (struct Term expression (pat) #:transparent)
+(struct Store-lookup expression (key-expr) #:transparent)
+(struct Meta-function-call expression (name arg-pat) #:transparent)
+(struct If expression (g t e) #:transparent)
+(struct Equal expression (l r) #:transparent)
+(struct Let expression (bindings body-expr) #:transparent)
+;; If expecting a set, make an arbitrary choice.
+;; Labelled to distinguish different answers when evaluating expressions.
+(struct Choose expression (label expr) #:transparent)
 
 (struct Map-empty? expression (mvar) #:transparent)
 (struct Empty-map expression (container) #:transparent)
@@ -272,32 +297,19 @@ Allow stores (special)
 (struct Map-extend expression (mvar key-expr val-expr trust-strong?) #:transparent)
 (struct Map-remove expression (mvar key-expr) #:transparent) ;; doesn't error if key not present.
 (struct In-Dom? expression (mvar key-expr) #:transparent)
-;; XXX: Should be definable with the map-with pattern and Map-empty?
-#;(struct Pre-image expression (mvar val-expr) #:transparent)
-
-(struct Store-lookup expression (key-expr) #:transparent)
-
-(struct Meta-function-call expression (name arg-pat) #:transparent)
-
-(struct If expression (g t e) #:transparent)
-(struct Equal expression (l r) #:transparent)
-(struct Let expression (bindings body-expr) #:transparent)
 
 (struct Set-empty? expression (expr) #:transparent)
 (struct Empty-set expression (container) #:transparent)
-(struct Set-Union expression (exprs) #:transparent)
+(struct In-Set? expression (set-expr expr) #:transparent)
+(struct Set-Union expression (set-expr exprs) #:transparent)
 (struct Set-Intersect expression (set-expr exprs) #:transparent)
 (struct Set-Subtract expression (set-expr exprs) #:transparent)
 (struct Set-Remove* expression (set-expr exprs) #:transparent)
 (struct Set-Add* expression (set-expr exprs) #:transparent)
-(struct In-Set? expression (set-expr expr) #:transparent)
+
 
 (struct Unsafe-store-space-ref expression () #:transparent)
 (struct Unsafe-store-ref expression (space) #:transparent)
-
-;; If expecting a set, make an arbitrary choice.
-;; Labelled to distinguish different answers when evaluating expressions.
-(struct Choose expression (label expr) #:transparent)
 
 (struct SAlloc expression (space) #:transparent)
 (struct MAlloc expression (space) #:transparent)

@@ -38,10 +38,7 @@ in the spaces.rkt format.
           (match (inner pat d ρ)
             [#f #f]
             [ρ (hash-set ρ x d)])]
-         [other (cond [(equal? other d)
-                       (match (inner pat d ρ)
-                         [#f #f]
-                         [ρ ])])])]
+         [other (and (equal? other d) (inner pat d ρ))])]
 
       [((variant v comps) (variant v* ds))
        (cond
@@ -155,31 +152,27 @@ in the spaces.rkt format.
        (match-define (Result/effect kv store-spaces*) kres)
        (Result/effect (dict-has-key? mv kv) store-spaces*))]
 
-    [(Set-Union _ exprs)
-     (let do-union ([exprs exprs] [cur-set ∅] [store-spaces store-spaces])
-       (match exprs
-         ['() (set (Result/effect cur-set store-spaces))]
-         [(cons expr exprs)
-          (for/union ([res (in-set (expression-eval expr ρ store-spaces))])
-            (match-define (Result/effect v store-spaces*) res)
-            (do-union exprs (set-union cur-set v) store-spaces*))]))]
-    [(Set-Add* _ set-expr exprs)
+    [(or (Set-Union _ set-expr exprs)
+         (Set-Add* _ set-expr exprs)
+         (Set-Remove* _ set-expr exprs)
+         (Set-Intersect _ set-expr exprs)
+         (Set-Subtract _ set-expr exprs))
+     (define set-op
+       (cond [(Set-Union? e) set-union]
+             [(Set-Add*? e) set-add]
+             [(Set-Remove*? e) set-remove]
+             [(Set-Intersect? e) set-intersect]
+             [(Set-Subtract? e) set-subtract]))
      (for/fold ([acc ∅]) ([sres (in-set (expression-eval set-expr ρ store-spaces))])
        (match-define (Result/effect sv store-spaces*) sres)
-       (let do-add ([exprs exprs] [cur-set sv] [store-spaces store-spaces*])
+       (let do-set-op ([exprs exprs] [cur-set sv] [store-spaces store-spaces*])
          (match exprs
            ['() (set-union acc (Result/effect cur-set store-spaces))]
            [(cons expr exprs)
             (for/fold ([acc acc]) ([res (in-set (expression-eval expr ρ store-spaces))])
               (match-define (Result/effect v store-spaces*) res)
               (set-union acc
-                         (do-add exprs (set-add cur-set v) store-spaces*)))])))]
-    [(Set-Intersect _ set-expr exprs)
-     (error 'c/expression-eval "TODO set-intersect")]
-    [(Set-Remove* _ set-expr exprs)
-     (error 'c/expression-eval "TODO set-remove*")]
-    [(Set-Subtract _ set-expr exprs)
-     (error 'c/expression-eval "TODO set-subtract")]
+                         (do-set-op exprs (set-op cur-set v) store-spaces*)))])))]
 
     [(In-Set? _ set-expr expr)
      (for/fold ([acc ∅]) ([sres (in-set (expression-eval set-expr ρ store-spaces))])

@@ -1,5 +1,5 @@
 #lang racket/base
-(require "spaces.rkt")
+(require "spaces.rkt" racket/dict racket/match)
 (provide alloc-skeleton)
 
 ;; Each allocation expression should be qualified with a distinct "hint" for
@@ -74,9 +74,8 @@
      (expression-hints g (expression-hints t (expression-hints e tail)))]
     [(Let _ bscs bexpr)
      (bscs-hints bscs (expression-hints bexpr tail))]
-    [(Set-Union _ exprs)
-     (hint-map expression-hints exprs tail)]
-    [(or (Set-Add* _ expr exprs)
+    [(or (Set-Union _ expr exprs)
+         (Set-Add* _ expr exprs)
          (Set-Remove* _ expr exprs)
          (Set-Subtract _ expr exprs)
          (Set-Intersect _ expr exprs))

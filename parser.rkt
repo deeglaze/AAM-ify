@@ -17,7 +17,7 @@ identifiers for syntax errors.
 
 TODO?: Add binding arrows using DrRacket's API
 |#
-(require "spaces.rkt" "shared.rkt"
+(require "spaces.rkt" "shared.rkt" racket/match
          (for-syntax
 
           racket/pretty racket/trace
@@ -34,6 +34,7 @@ TODO?: Add binding arrows using DrRacket's API
          define-metafunctions
          reify-language reify-metafunctions-of
          --> Setof Any where update
+         unparse-semantics
          (for-syntax Lang))
 
 (define-syntax (--> stx) (raise-syntax-error #f "For use in Rule form" stx))
@@ -135,10 +136,11 @@ TODO?: Add binding arrows using DrRacket's API
      [(with-orig-stx v core stx)
       (define v*
         (match v
-          [(Variant name comps)
+          [(Variant name comps tr? tc?)
            #`(Variant #'#,name
                       (vector #,@(for/list ([comp (in-vector comps)])
-                                   (quine-Component comp))))]
+                                   (quine-Component comp)))
+                      #,tr? #,tc?)]
           [other (error 'quine-Variant "Bad variant ~a" other)]))
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
      [_ (error 'quine-Variant "Bad wos ~a" var)]))
@@ -152,6 +154,7 @@ TODO?: Add binding arrows using DrRacket's API
           [(Map dom rng) #`(Map #,(quine-Component dom) #,(quine-Component rng))]
           [(℘ comp) #`(℘ #,(quine-Component comp))]
           [(or (? Anything?) (? Address-Space?)) core]
+          [(or (? number?) (? string?) (? char?) (? boolean?) (? null?) (? symbol?)) #`'#,v]
           [other (error 'quine-Component "Bad component ~a" c)]))
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
      [_ (error 'quine-Component "Bad wos ~a" c)]))
@@ -188,7 +191,7 @@ TODO?: Add binding arrows using DrRacket's API
          [(Let si bscs body) #`(Let #,si (list #,@(map quine-bsc bscs)) #,(do body))]
          [(Equal si l r) #`(Equal #,si #,(do l) #,(do r))]
 
-         [(Set-Union si es) #`(Set-Union #,si (list #,@(map do es)))]
+         [(Set-Union si s vs) #`(Set-Union #,si #,(do s) (list #,@(map do vs)))]
          [(Set-Add* si s vs) #`(Set-Add* #,si #,(do s) (list #,@(map do vs)))]
          [(Set-Remove* si s vs) #`(Set-Remove* #,si #,(do s) (list #,@(map do vs)))]
          [(Set-Subtract si s vs) #`(Set-Subtract #,si #,(do s) (list #,@(map do vs)))]
@@ -232,17 +235,6 @@ TODO?: Add binding arrows using DrRacket's API
       (cond [(cmp v v0) #t]
             [(cmp v v1) #f]
             [else (list-order< lst v0 v1 cmp)])]))
-
- (define (choose-best orig-stx order v0 ns0 nl0 v1 ns1 nl1)
-   (define name (Variant-name (with-orig-stx-v
-                               (variant-vpointer (with-orig-stx-v v0)))))
-   (if (list-order<
-        (free-id-table-ref
-         order name
-         )
-        v0 v1)
-       (values v0 ns0 nl0)
-       (values v1 ns1 nl1)))
 
  (define (free-id-table-has-key? t k)
    (not (eq? (free-id-table-ref t k -unmapped) -unmapped)))
@@ -303,6 +295,28 @@ TODO?: Add binding arrows using DrRacket's API
 (define pat-reserved? (literal-set->predicate pat-ids))
 (define comp-reserved? (literal-set->predicate component-lits))
 
+(define-syntax-class atomic
+  #:attributes (value)
+  (pattern n:number #:attr value (syntax-e #'n))
+  (pattern s:str #:attr value (syntax-e #'s))
+  (pattern b:boolean #:attr value (syntax-e #'b))
+  (pattern c:char #:attr value (syntax-e #'c)))
+
+(define-syntax-class literal-data
+  #:attributes (value)
+  (pattern (~and orig-stx
+                 (~or a:atomic
+                      ((~literal quote) (~or sym:id qa:atomic (~and () null)))))
+           #:do [(define v
+                   (or (attribute a.value)
+                       (attribute qa.value)
+                       (and (attribute sym) (syntax-e #'sym))
+                       (and (attribute null) '())))]
+           #:attr value (with-orig-stx
+                         v
+                         #'orig-stx
+                         #'orig-stx)))
+
 ;; pats are passed in unparsed.
 ;; If expected-space is non-#f, we check that (vname . pats) matches the given space.
 ;; Otherwise, we find the most suitable Variant in the language. If multiple Variant values
@@ -317,7 +331,7 @@ TODO?: Add binding arrows using DrRacket's API
            ['() (on-fail)]
            [(cons (and v/orig
                        (with-orig-stx
-                        (and v (Variant (== vname free-identifier=?) _))
+                        (and v (Variant (== vname free-identifier=?) _ _ _))
                         core _))
                   v-or-cs)
             (syntax-parse pats
@@ -387,7 +401,8 @@ TODO?: Add binding arrows using DrRacket's API
 (define-syntax-class (Patterns L expected-spaces/components pattern? bound-vars pun-space?)
   #:attributes (values non-linear? new-scope)
   (pattern ()
-           #:fail-unless (null? expected-spaces/components)
+           #:fail-unless (or (null? expected-spaces/components)
+                             (not expected-spaces/components))
            (format "Expected more components ~a" expected-spaces/components)
            #:attr values '()
            #:attr non-linear? #f
@@ -398,7 +413,7 @@ TODO?: Add binding arrows using DrRacket's API
                                     (car expected-spaces/components))
                              pattern? bound-vars pun-space?))
             .
-            (~var ps (Patterns L (cdr expected-spaces/components)
+            (~var ps (Patterns L (and (not pattern?) (cdr expected-spaces/components))
                                pattern?
                                (attribute p.new-scope)
                                pun-space?)))
@@ -566,9 +581,10 @@ TODO?: Add binding arrows using DrRacket's API
            (format "Unknown space ~a" (syntax-e #'space))
            #:attr value (with-orig-stx (Space-reference #'space)
                                        #'(Space-reference 'space)
-                                       #'space)))
+                                       #'space))
+  (pattern l:literal-data #:attr value (attribute l.value)))
 
-(define-syntax-class (Variant-cls Space-names)
+(define-syntax-class (Variant-cls Space-names trust-recursion? trust-construction?)
   #:attributes (value)
   (pattern (~and orig-stx (constructor:id (~var cs (Component-cls Space-names)) ...))
            #:fail-when (pat-reserved? #'constructor)
@@ -576,18 +592,24 @@ TODO?: Add binding arrows using DrRacket's API
            #:fail-when (comp-reserved? #'constructor)
            (format "Name reserved for the component language ~a" (syntax-e #'constructor))
            #:attr value
-           (with-orig-stx (Variant #'constructor (list->vector (attribute cs.value)))
-                          #`(Variant 'constructor (vector #,@(map with-orig-stx-core (attribute cs.value))))
+           (with-orig-stx (Variant #'constructor
+                                   (list->vector (attribute cs.value))
+                                   trust-recursion? trust-construction?)
+                          #`(Variant 'constructor 
+                                     (vector #,@(map with-orig-stx-core (attribute cs.value)))
+                                     #,trust-recursion?
+                                     #,trust-construction?)
                           #'orig-stx)))
 
-(define-syntax-class (variant-or-component Space-names)
+(define-syntax-class (variant-or-component Space-names trust-recursion? trust-construction?)
   #:attributes (value)
   #:description "A variant declaration or a component"
   (pattern (~var c (Component-cls Space-names))
            #:attr value (attribute c.value))
-  (pattern (~var v (Variant-cls Space-names))
+  (pattern (~var v (Variant-cls Space-names trust-recursion? trust-construction?))
            #:attr value (attribute v.value)))
 
+;; Right hand side of a space definition [Space . space-inhabitants]
 (define-syntax-class (Space-inhabitants Space-names)
   #:attributes (value)
   (pattern (~and orig-stx
@@ -596,14 +618,18 @@ TODO?: Add binding arrows using DrRacket's API
                                         (~optional (~and precision
                                                          (~or #:abstract #:discrete #:concrete)))
                                         (~optional (~seq #:equality equality:expr))) ...))
+           #:do [(define precision-classifier
+                   (if (attribute precision)
+                       (string->symbol (keyword->string (syntax-e #'precision)))
+                       'abstract))]
            #:attr value
            (with-orig-stx
             (External-Space (eval-syntax #'pred)
                             (and (attribute card) (eval-syntax #'card))
-                            (if (attribute precision) (syntax-e #'precision) 'abstract)
+                            precision-classifier
                             (and (attribute equality) (eval-syntax #'equality)))
-            (template
-             (External-Space pred (?? card #f) (?? precision 'abstract) (?? equality #f)))
+            (quasitemplate
+             (External-Space pred (?? card #f) '#,precision-classifier (?? equality #f)))
             #'orig-stx))
   (pattern (~and orig-stx (#:address-space ~! tag:id))
            #:attr value (with-orig-stx (Address-Space (syntax-e #'tag))
@@ -612,10 +638,12 @@ TODO?: Add binding arrows using DrRacket's API
 
   ;; A User space is a sequence of variants
   (pattern (~and orig-stx
-                 ((~or (~and (~var vcs (variant-or-component Space-names)) ~!)
-                       (~optional (~and #:trust-recursion trust-rec))
+                 ((~or (~optional (~and #:trust-recursion trust-rec))
                        (~optional (~and #:trust-construction trust-con)))
-                  ...))
+                  ...
+                  (~and (~var vcs (variant-or-component Space-names
+                                                        (syntax? (attribute trust-rec))
+                                                        (syntax? (attribute trust-con)))) ~!) ...))
            #:attr value
            (with-orig-stx (User-Space (attribute vcs.value)
                                       (syntax? (attribute trust-rec))
@@ -669,6 +697,7 @@ TODO?: Add binding arrows using DrRacket's API
                                       #,(and (attribute d-e)
                                              (with-orig-stx-core (attribute d-e.value)))))
                          #'orig-stx))
+
   (pattern (~and orig-stx (Map-extend ~! m:id k-e v-e (~optional (~and #:trust-strong trust))))
            #:fail-unless (free-id-table-has-key? bound-vars #'m)
            (format "Unbound map variable ~a" (syntax-e #'m))
@@ -686,6 +715,7 @@ TODO?: Add binding arrows using DrRacket's API
                                        #,(with-orig-stx-core (attribute v-e.value))
                                        #,(syntax? (attribute trust)))
                          #'orig-stx))
+
   (pattern (~and orig-stx (Map-remove ~! m:id k-e))
            #:fail-unless (free-id-table-has-key? bound-vars #'m)
            (format "Unbound map variable ~a" (syntax-e #'m))
@@ -699,6 +729,7 @@ TODO?: Add binding arrows using DrRacket's API
                                       'm
                                       #,(with-orig-stx-core (attribute k-e.value))))
                          #'orig-stx))
+
   (pattern (~and orig-stx (In-Dom? ~! m:id k-e))
            #:fail-unless (free-id-table-has-key? bound-vars #'m)
            (format "Unbound map variable ~a" (syntax-e #'m))
@@ -712,6 +743,7 @@ TODO?: Add binding arrows using DrRacket's API
                                    'm
                                    #,(with-orig-stx-core (attribute k-e.value))))
                          #'orig-stx))
+
   (pattern (~and orig-stx (Map-empty? ~! m:id))
            #:fail-unless (free-id-table-has-key? bound-vars #'m)
            (format "Unbound map variable ~a" (syntax-e #'m))
@@ -719,6 +751,7 @@ TODO?: Add binding arrows using DrRacket's API
                          (Map-empty? many #'m)
                          (quasitemplate (Map-empty? #,many 'm))
                          #'orig-stx))
+
   (pattern (~and orig-stx (Empty-map ~! (~or (~optional (~and #:discrete discrete))
                                           (~optional (~and #:concrete concrete))
                                           ;; for symmetry.
@@ -799,20 +832,11 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr value (with-orig-stx (Empty-set pure fn)
                                        #`(Empty-set #,pure #,stx)
                                        #'orig-stx))
-  (pattern (~and orig-stx (Set-Union ~! s-e ...))
-           #:do [(define tag
-                   (let get-tag ([tag pure] [exprs (attribute s-e.value)])
-                     (match exprs
-                       [(cons e exprs)
-                        (get-tag (fxior tag (expression-store-interaction (with-orig-stx-v e)))
-                                 exprs)]
-                       ['() tag])))]
-           #:attr value
-           (with-orig-stx (Set-Union tag (attribute s-e.value))
-                          #`(Set-Union #,tag (list #,@(map with-orig-stx-core (attribute s-e.value))))
-                          #'orig-stx))
+
   (pattern (~and orig-stx ((~and head
-                                 (~or (~and Set-Add*
+                                 (~or (~and Set-Union
+                                            (~bind [constr Set-Union]))
+                                      (~and Set-Add*
                                             (~bind [constr Set-Add*]))
                                       (~and Set-Remove*
                                             (~bind [constr Set-Remove*] [tagx many]))
@@ -985,7 +1009,7 @@ TODO?: Add binding arrows using DrRacket's API
     [(with-orig-stx (User-Space vars _ _) _ _)
      (for/or ([v-or-c (in-list vars)])
        (match (with-orig-stx-v v-or-c)
-         [(Variant name _)
+         [(Variant name _ _ _)
           (and (free-identifier=? c name)
                v-or-c)]
          [(Space-reference s) (get-variant-in-space spaces c s)]
@@ -1058,8 +1082,8 @@ TODO?: Add binding arrows using DrRacket's API
 
 (define-syntax (reify-language stx)
   (syntax-parse stx
-    [(_ i:Lang)
-     (match-define (Language spaces refinement-order) (attribute i.langv))
+    [(_ L:Lang)
+     (match-define (Language spaces refinement-order) (attribute L.langv))
      #`(Language (hash #,@(reverse
                            (for/fold ([kvs '()]) ([(name space) (in-free-id-table spaces)])
                              (list* (with-orig-stx-core space) #`(quote #,name) kvs))))
@@ -1088,6 +1112,8 @@ TODO?: Add binding arrows using DrRacket's API
              .
              (~var bscs (Bindings langv (attribute lhs.new-scope) Ξ pun-space?))]
         ...)
+     ;; Parse right-hand-sides after the fact since the binding-side-conditions extend the scope
+     ;; positionally after the RHS.
      (define rhss
        (for/list ([rhs (in-list (attribute rhs-raw))]
                   [bscsns (in-list (attribute bscs.new-scope))])
@@ -1100,12 +1126,11 @@ TODO?: Add binding arrows using DrRacket's API
                           [bsc (in-list (attribute bscs.value))]
                           [n (in-list (attribute name))]
                           [si (in-list (attribute bscs.interaction))])
-                 (quasitemplate
-                  (Rule (?? 'n #f)
-                        #,(with-orig-stx-core l)
-                        #,(with-orig-stx-core r)
-                        (list . #,(map with-orig-stx-core bsc))
-                        #,si))))]))
+                 #`(Rule #,(and n #`'#,n)
+                         #,(with-orig-stx-core l)
+                         #,(with-orig-stx-core r)
+                         (list . #,(map with-orig-stx-core bsc))
+                         #,si)))]))
 
 (begin-for-syntax
  (define (name-is-constructor? L id)
@@ -1154,7 +1179,7 @@ TODO?: Add binding arrows using DrRacket's API
           (values (cons #`(Rule #f
                                 #,(quine-pattern l)
                                 #,(quine-pattern r)
-                                (list #,@(map quine-bsc bsc))
+                                (list . #,(map quine-bsc bsc))
                                 #,si)
                         rev-rules)
                   (fxior si overall-si))))
@@ -1165,8 +1190,9 @@ TODO?: Add binding arrows using DrRacket's API
                                      (attribute tr-writes)
                                      (attribute tr-allocs)
                                      (attribute tr-many)))]
-                 [quality (in-list (list reads writes allocs many))])
-              (if syn (fxior si quality) syn))
+                 [quality (in-list (list reads writes allocs many))]
+                 #:when syn)
+              (fxior si quality))
             si))
       (quasitemplate
        (with-orig-stx
@@ -1210,3 +1236,97 @@ TODO?: Add binding arrows using DrRacket's API
                   other-mfs #'#,name
                   #,(parse-meta-function mf Ξ (attribute L.langv)
                                          (syntax? (attribute pun-space)))))))]))
+
+(define (unparse-rule L rule)
+  (match rule
+   [(Rule name lhs rhs bscs si)
+    `(Rule ,name
+           ,(unparse-pattern L lhs)
+           ,(unparse-pattern L rhs)
+           ,(unparse-bscs L bscs))]))
+
+(define (unparse-semantics L R) (for/list ([rule (in-list R)]) (unparse-rule L rule)))
+
+(define (unparse-pattern L p)
+  (define (recur p)
+    (match p
+      [(Name x pat)
+       `(Name ,x ,(recur pat))]
+      [(Space S) (unparse-space L S)]
+      [(Rvar x) x]
+      [(Set-with vpat spat mode)
+       `(Set-with ,(recur vpat) ,(recur spat) ,mode)]
+      [(Map-with kpat vpat mpat mode)
+       `(Map-with ,(recur kpat) ,(recur vpat) ,(recur mpat) ,mode)]
+      [(variant (Variant name _ _ _) pats)
+       (cons name (for/list ([p (in-vector pats)]) (recur p)))]
+      [(== -Anything eq?)
+       '_]))
+  (recur p))
+
+(define (unparse-bsc L bsc)
+  (match bsc
+    [(When e) `(when ,(unparse-expression L e))]
+    [(Binding pat e) `(where ,(unparse-pattern L pat) ,(unparse-expression L e))]
+    [(Store-extend ae ve strong?) `(update ,(unparse-expression L ae) ,(unparse-expression L ve) ,strong?)]))
+
+(define (unparse-bscs L bscs)
+  (for/list ([bsc (in-list bscs)]) (unparse-bsc L bsc)))
+
+(define (unparse-space L S)
+  (match S
+    [(Space-reference name) name]
+    [(Address-Space space) `(Address-Space ,space)]
+    [_ (or (for/or ([(name S*) (in-hash (Language-spaces L))]
+                    #:when (equal? S S*))
+              name)
+            `(could-not-unparse ,S))]))
+
+(define (unparse-expression L e)
+  (define (recur e)
+    (match e
+      [(Let _ bscs body) `(Let ,(unparse-bscs L bscs) ,(recur body))]
+      [(Term _ pat) `(Term ,(unparse-pattern L pat))]
+      [(Boolean _ b) b]
+      [(Store-lookup _ k) `(Store-lookup ,(recur k))]
+      [(If _ g t e) `(If ,(recur g) ,(recur t) ,(recur e))]
+      [(Equal _ l r) `(Equal ,(recur l) ,(recur r))]
+      [(Choose _ ℓ e) `(Choose ,ℓ ,(recur e))]
+      [(Meta-function-call _ name pat) (cons name (unparse-pattern L pat))]
+      [(SAlloc _ space) `(SAlloc ,space)]
+      [(MAlloc _ space) `(MAlloc ,space)]
+      [(QSAlloc _ space hint) `(SAlloc ,space ,hint)]
+      [(QMAlloc _ space hint) `(MAlloc ,space ,hint)]
+      
+      [(Map-lookup _ mvar k default? d)
+       `(Map-lookup ,mvar ,(recur k) . ,(if d
+                                                         (list (recur d))
+                                                         '()))]
+      [(Map-extend _ mvar k v strong?)
+       `(Map-extend ,mvar ,(recur k) ,(recur v) ,strong?)]
+      [(Map-remove _ mvar k)
+       `(Map-remove ,mvar ,(recur k))]
+      [(Empty-map _ container)
+       (if (procedure? container)
+           `(Empty-map ,container)
+           `(Empty-map ,(recur container)))]
+      [(In-Dom? _ mvar k)
+       `(In-Dom? ,mvar ,(recur k))]
+      [(Map-empty? _ mvar)
+       `(Map-empty? ,mvar)]
+
+      [(Empty-set _ container)
+       (if (procedure? container)
+           `(Empty-set ,container)
+           `(Empty-set ,(recur container)))]
+      [(Set-empty? _ e)
+       `(Set-empty? _ ,(recur e))]
+      [(In-Set? _ s v)
+       `(In-Set? ,(recur s) ,(recur v))]
+      [(or (Set-Union _ s ss)
+            (Set-Add* _ s ss)
+            (Set-Remove* _ s ss)
+            (Set-Intersect _ s ss)
+            (Set-Subtract _ s ss))
+       `(,(object-name e) ,(recur s) . ,(map recur ss))]))
+  (recur e))

@@ -260,7 +260,7 @@ The abstract semantics differs from the concrete semantics in the following ways
            (match-define (Abs-Result/effect kcertain? k store-spaces* μ*) kres)
            (for/fold ([acc acc]) ([k (in-data k)])
              (answer-⊔1 acc kchoice
-                      (Abs-Result/effect kcertain? 
+                      (Abs-Result/effect kcertain?
                                          (a/map-remove map k store-spaces* μ*)
                                          store-spaces*
                                          μ*))))]
@@ -441,37 +441,18 @@ The abstract semantics differs from the concrete semantics in the following ways
                 (log-info (format "Set-empty? given non-set ~a" other))
                 results])))]
 
-        [(Set-Union _ exprs)
-         (define logged (mutable-set))
-         (let ev-all ([choices choices]
-                      [certain? certain?]
-                      [exprs exprs]
-                      [cur-set ∅]
-                      [store-spaces store-spaces]
-                      [μ μ])
-           (match exprs
-             ['() (hash choices (Abs-Result/effect certain? cur-set store-spaces μ))]
-             [(cons expr exprs)
-              (for/fold ([results answer⊥])
-                  ([(rchoice res) (in-hash (inner expr ρ store-spaces μ choices certain?))])
-                (match-define (Abs-Result/effect vcertain? v store-spaces* μ*) res)
-                (for/fold ([results results]) ([v (in-data v)])
-                  (cond
-                   [(set? v)
-                    (answer-⊔
-                     results
-                     (ev-all rchoice vcertain?
-                             exprs (set-union cur-set v) store-spaces* μ*))]
-                   [else
-                    (unless (set-member? logged v)
-                      (log-info (format "Cannot union non-set ~a" v))
-                      (set-add! logged v))
-                    results])))]
-             [_ (error 'set-union "bad exprs ~a" exprs)]))]
-
-;;; FIXME?: must trust that the expressions all fit in the same concrete/discrete or abstract
-        ;; domain as the set.
-        [(Set-Add* _ set-expr exprs)
+        [(or (Set-Union _ set-expr exprs)
+             ;; FIXME?: must trust that the expressions all fit in the same
+             ;; concrete/discrete or abstract domain as the set.
+             (Set-Add* _ set-expr exprs))
+         (define-values (set-op sane? verb-phrase)
+           (if (Set-Add*? e)
+               (values set-add (const #t) "add to" #f)
+               (values set-union
+                       (λ (s)
+                          (or (set? s)
+                                  (not (log-info (format "Cannot union not-set ~a" s)))))
+                       "union")))
          (for/fold ([results answer⊥])
              ([(schoice setres) (in-hash (inner set-expr ρ store-spaces μ choices certain?))])
            (match-define (Abs-Result/effect scertain? setv store-spaces* μ*) setres)
@@ -482,7 +463,7 @@ The abstract semantics differs from the concrete semantics in the following ways
                  [(abstract-set S) (values abstract-set S)]
                  [(discrete-set S) (values discrete-set S)]
                  [other
-                  (log-info (format "Cannot add to non-set ~a" other))
+                  (log-info (format "Cannot ~a non-set ~a" verb-phrase other))
                   #f]))
              (cond
               [container
@@ -493,12 +474,14 @@ The abstract semantics differs from the concrete semantics in the following ways
                             [store-spaces store-spaces*]
                             [μ μ*])
                  (match exprs
-                   ['() (hash choices (Abs-Result/effect certain? (container cur-set) store-spaces μ))]
+                   ['() (hash choices
+                              (Abs-Result/effect certain? (container cur-set) store-spaces μ))]
                    [(cons expr exprs)
                     (for/fold ([results results])
                         ([(echoice res) (in-hash (inner expr ρ store-spaces μ choices certain?))])
                       (match-define (Abs-Result/effect vcertain? v store-spaces* μ*) res)
-                      (for/fold ([results results]) ([v (in-data v)])
+                      (for/fold ([results results]) ([v (in-data v)]
+                                                     #:when (sane? v))
                         (answer-⊔ results
                                   (ev-all echoice vcertain? exprs
                                           (set-add cur-set v)

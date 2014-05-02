@@ -120,9 +120,9 @@ Utility functions and specific functions that are shared between concrete and ab
   (in-space? L space d))
 
 (define (in-variant? L var d)
-  (match-define (Variant name comps) var)
+  (match-define (Variant name comps _ _) var)
   (match d
-    [(variant (Variant (== name) _) ds)
+    [(variant (Variant (== name) _ _ _) ds)
      ;; INVARIANT: variants with the same name have same length vectors.
      (for/and ([comp (in-vector comps)]
                [d (in-vector ds)])
@@ -232,7 +232,7 @@ Utility functions and specific functions that are shared between concrete and ab
 
 (define (dpattern->sexp d)
   (match d
-    [(variant (Variant name _) ds)
+    [(variant (Variant name _ _ _) ds)
      (cons name (for/list ([d (in-vector ds)]) (dpattern->sexp d)))]
     [(or (discrete-ffun d)
          (abstract-ffun d)
