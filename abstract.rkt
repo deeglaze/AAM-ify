@@ -402,6 +402,14 @@ The abstract semantics differs from the concrete semantics in the following ways
           (λ (ρ store-spaces μ choices certain?)
              (inner bexpr ρ store-spaces μ choices certain?)))]
 
+        ;; TODO?: allow rules to have expressions in the rhs
+        [(Match _ dexpr rules)
+         (for/fold ([results answer⊥])
+             ([(dchoice dres) (in-hash (inner dexpr ρ store-spaces μ choices certain?))])
+           (match-define (Abs-Result/effect dcertain? dv store-spaces* μ*) dres)
+           (answer-⊔ results
+                     (rules-in-order ς store-spaces* μ* rules dv)))]
+
 ;;; Set operations
 
         [(Set-empty? _ set-expr)
@@ -530,6 +538,9 @@ The abstract semantics differs from the concrete semantics in the following ways
 
         [bad (error 'expr-eval "Bad expression ~a" bad)])))
 
+  ;; FIXME: distinguish stuck expressions from failing side-conditions to properly
+  ;; continue to try the following rule.
+
   ;; Binding/Store-extend/When are side-effecting statements (local/global/control).
   ;; They are available at the top level and in Let expressions.
   ;; Returns set of results and Boolean (#t iff there is a b.⊤ certain? result).
@@ -632,37 +643,7 @@ The abstract semantics differs from the concrete semantics in the following ways
        answer⊥]
       [(== -unmapped eq?)
        (hash-set! mf-table key #f)
-       (define results
-         (let try-rules ([rules rules] [results answer⊥])
-           (match rules
-             ['() results]
-             [(cons (and rule (Rule name lhs rhs binding-side-conditions store-interaction)) rules)
-              (define-values (results* found?)
-               (for/fold ([results results]
-                          [found? #f])
-                   ([dρ (in-match-results (a/match lhs argd ρ₀ store-spaces μ))])
-                 (define-values (b♯ ρ)
-                   (match dρ [(May ρ) (values 'b.⊤ ρ)] [ρ (values #t ρ)]))
-                 (expr-eval-bindings
-                  ς
-                  binding-side-conditions ρ store-spaces μ '() b♯
-                  (λ (ρ store-spaces μ choices certain?)
-                     (define results*
-                       (answer-⊔1 results choices
-                                ;; Quality is #t since meta-functions' evaluation does not affect
-                                ;; the matching of a rule.
-                                (Abs-Result/effect #t (pattern-eval rhs ρ) store-spaces μ)))
-                     (cond
-                      ;; True match; we can stop searching through rules.
-                      [certain? (values results* #t)]
-                      [else
-                       (log-info
-                        (format "Possible misfire of meta-function rule due to imprecise match ~a ~a ~a"
-                                rule rhs ρ))
-                       (values results* (b∨ found? 'b.⊤))])))))
-              (match found?
-                [#t results*]
-                [_  (try-rules rules results*)])])))
+       (define results (rules-in-order ς store-spaces μ rules argd))
        (hash-set! mf-table key results)
        results]
       [results results]))
@@ -673,6 +654,42 @@ The abstract semantics differs from the concrete semantics in the following ways
             (parameterize ([mf-memo table])
               (do-mf-eval table))]
         [table (do-mf-eval table)])))
+
+(define (rules-in-order ς store-spaces μ rules argd)
+  (let try-rules ([rules rules] [results answer⊥])
+    (match rules
+      ['() results]
+      [(cons (and rule (Rule name lhs rhs binding-side-conditions store-interaction)) rules)
+       (define found?-Ivar (box #f)) ;; only increases, thus a classic Ivar.
+       (define results*
+         (for/fold ([results results])
+             ([dρ (in-match-results (a/match lhs argd ρ₀ store-spaces μ))])
+           (define-values (b♯ ρ)
+             (match dρ [(May ρ) (values 'b.⊤ ρ)] [ρ (values #t ρ)]))
+           (expr-eval-bindings
+            ς
+            binding-side-conditions ρ store-spaces μ '() b♯
+            (λ (ρ store-spaces μ choices certain?)
+               (define results*
+                 (answer-⊔1 results choices
+                          ;; Quality is #t since meta-functions' evaluation does not affect
+                          ;; the matching of a rule.
+                          (Abs-Result/effect #t (pattern-eval rhs ρ) store-spaces μ)))
+               (cond
+                ;; True match; we can stop searching through rules.
+                [certain?
+                 (set-box! found?-Ivar #t)
+                 results*]
+                [else
+                 (log-info
+                  (format "Possible misfire of meta-function rule due to imprecise match ~a ~a ~a"
+                          rule rhs ρ))
+                 (set-box! (b∨ (unbox found?-Ivar) 'b.⊤))
+                 results*])))))
+       (match (unbox found?-Ivar)
+         [#t results*]
+         [_ (try-rules rules results*)])])))
+
 (define mf-eval slow-meta-function-eval)
 (define rule-eval slow-rule-eval)
 (define expression-eval slow-expression-eval))

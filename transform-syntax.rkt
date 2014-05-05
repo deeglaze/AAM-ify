@@ -193,6 +193,7 @@
       (stabilize-ΞΔ mfs* ΞΔ*)
       (values mfs* ΞΔ*)))
 
+;; TODO: lift to syntax level to provide better errors.
 (define-syntax (transform-semantics stx)
   (syntax-parse stx
     [(_ L:Lang red:expr)

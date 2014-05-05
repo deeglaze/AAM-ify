@@ -131,6 +131,19 @@ TODO?: Add binding arrows using DrRacket's API
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
      [_ (error 'quine-pat "Bad wos ~a" pat)]))
 
+ (define (quine-rule rule)
+   (match rule
+     [(with-orig-stx v core stx)
+      (define v*
+        (match v
+          [(Rule name lhs rhs bscs si)
+           #`(Rule #,(and name #`#'#,name) #,(quine-pattern lhs) #,(quine-pattern rhs)
+                   (list . #,(map quine-bsc bscs))
+                   #,si)]
+          [_ (error 'quine-rule "Bad rule ~a" v)]))
+      #`(with-orig-stx #,v* #'#,core #'#,stx)]
+     [_ (error 'quine-rule "Bad wos ~a" rule)]))
+
  (define (quine-Variant var)
    (match var
      [(with-orig-stx v core stx)
@@ -188,7 +201,8 @@ TODO?: Add binding arrows using DrRacket's API
          [(Store-lookup si k) #`(Store-lookup #,si #,(do k))]
 
          [(If si g t e) #`(If #,si #,(do g) #,(do t) #,(do e))]
-         [(Let si bscs body) #`(Let #,si (list #,@(map quine-bsc bscs)) #,(do body))]
+         [(Let si bscs body) #`(Let #,si (list . #,(map quine-bsc bscs)) #,(do body))]
+         [(Match si d rules) #`(Match #,si #,(do d) (list . #,(map quine-rule rules)))]
          [(Equal si l r) #`(Equal #,si #,(do l) #,(do r))]
 
          [(Set-Union si s vs) #`(Set-Union #,si #,(do s) (list #,@(map do vs)))]
@@ -253,6 +267,7 @@ TODO?: Add binding arrows using DrRacket's API
     Equal ;;
     Meta-function-call ;;
     Choose ;;
+    Match
 
     ;; Map expressions
     Map-lookup ;;
@@ -639,11 +654,14 @@ TODO?: Add binding arrows using DrRacket's API
   ;; A User space is a sequence of variants
   (pattern (~and orig-stx
                  ((~or (~optional (~and #:trust-recursion trust-rec))
-                       (~optional (~and #:trust-construction trust-con)))
-                  ...
-                  (~and (~var vcs (variant-or-component Space-names
+                       (~optional (~and #:trust-construction trust-con))
+                       blah)
+                  ...)
+                 ((~or _:keyword
+                       (~var vcs (variant-or-component Space-names
                                                         (syntax? (attribute trust-rec))
-                                                        (syntax? (attribute trust-con)))) ~!) ...))
+                                                        (syntax? (attribute trust-con)))))
+                  ...))
            #:attr value
            (with-orig-stx (User-Space (attribute vcs.value)
                                       (syntax? (attribute trust-rec))
@@ -672,7 +690,7 @@ TODO?: Add binding arrows using DrRacket's API
                          #`(Boolean #,pure v)
                          #'orig-stx))
 
-  ;;; Map expressions
+;;; Map expressions
   (pattern (~and orig-stx (Map-lookup ~! m:id k-e (~optional (~seq #:default d-e))))
            #:fail-unless (free-id-table-has-key? bound-vars #'m)
            (format "Unbound map variable ~a" (syntax-e #'m))
@@ -753,10 +771,10 @@ TODO?: Add binding arrows using DrRacket's API
                          #'orig-stx))
 
   (pattern (~and orig-stx (Empty-map ~! (~or (~optional (~and #:discrete discrete))
-                                          (~optional (~and #:concrete concrete))
-                                          ;; for symmetry.
-                                          (~optional #:abstract)
-                                          (~optional (~seq #:abstraction-of abs-of-e)))))
+                                             (~optional (~and #:concrete concrete))
+                                             ;; for symmetry.
+                                             (~optional #:abstract)
+                                             (~optional (~seq #:abstraction-of abs-of-e)))))
            #:do [(define-values (fn stx)
                    (cond [(syntax? (attribute discrete))
                           (values discrete-ffun #'discrete-ffun)]
@@ -770,7 +788,7 @@ TODO?: Add binding arrows using DrRacket's API
                                        #`(Empty-map #,pure #,stx)
                                        #'orig-stx))
 
-  ;;; Generic expressions
+;;; Generic expressions
 
   (pattern (~and orig-stx (If ~! g-e t-e e-e))
            #:do [(define tag (fxior (pesi g-e.value)
@@ -793,6 +811,42 @@ TODO?: Add binding arrows using DrRacket's API
                                  (list . #,(map with-orig-stx-core (attribute bscs.value)))
                                  #,(with-orig-stx-core (attribute body.value)))
                           #'orig-stx))
+  (pattern (~and orig-stx
+                 (Match ~! d-e
+                        (~and rule-stxs
+                              [(~var p (Pattern L #f #t bound-vars pun-space?))
+                               rhs-raw .
+                               (~var bscs (Bindings L (attribute p.new-scope) Ξ pun-space?))])
+                        ...))
+           #:do [(define-values (rev-rhs si)
+                   (for/fold ([rev-rhs '()] [si (pesi d-e)])
+                       ([rhs (in-list (attribute rhs-raw))]
+                        [bscsns (in-list (attribute bscs.new-scope))]
+                        [bscssi (in-list (attribute bscs.interaction))])
+                     (syntax-parse rhs
+                       [(~var rhs (Pattern L #f #f bscsns pun-space?))
+                        (values (cons (attribute rhs.value) rev-rhs)
+                                (fxior si bscssi))])))
+                 (define rhss (reverse rev-rhs))
+                 (define rules
+                   (for/list ([rule-stx (in-list (attribute rule-stxs))]
+                              [pat (in-list (attribute p.value))]
+                              [rhs (in-list rhss)]
+                              [bscsv (in-list (attribute bscs.value))]
+                              [bscssi (in-list (attribute bscs.interaction))])
+                     (with-orig-stx
+                      (Rule #f pat rhs bscsv bscssi)
+                      #`(Rule #f
+                              #,(with-orig-stx-core pat)
+                              #,(with-orig-stx-core rhs)
+                              (list . #,(map with-orig-stx-core bscsv))
+                              #,bscssi)
+                      rule-stx)))]
+           #:attr value (with-orig-stx (Match si (attribute d-e.value) rules)
+                                       #`(Match #,si
+                                                #,(with-orig-stx-core (attribute d-e.value))
+                                                (list . #,(map with-orig-stx-core rules)))
+                                       #'orig-stx))
   (pattern (~and orig-stx (Equal ~! l-e r-e))
            #:do [(define tag ;; can fail and can be approximate.
                    (fxior read/many
@@ -813,7 +867,7 @@ TODO?: Add binding arrows using DrRacket's API
              (Choose #,tag (?? 'ℓ (gensym)) #,(with-orig-stx-core (attribute s-e.value))))
             #'orig-stx))
 
-  ;;; Set expressions
+;;; Set expressions
 
   (pattern (~and orig-stx (Empty-set ~! (~or (~optional (~and #:discrete discrete))
                                              (~optional (~and #:concrete concrete))
@@ -851,7 +905,7 @@ TODO?: Add binding arrows using DrRacket's API
                      (match exprs
                        [(cons e exprs)
                         (get-tag (fxior tag (expression-store-interaction (with-orig-stx-v e)))
-                                   exprs)]
+                                 exprs)]
                        ['()
                         (if (attribute tagx)
                             (fxior (attribute tagx) tag)
@@ -872,8 +926,8 @@ TODO?: Add binding arrows using DrRacket's API
            (with-orig-stx
             (In-Set? tag (attribute s-e.value) (attribute v-e.value))
             #`(In-Set? #,tag
-                      #,(with-orig-stx-core (attribute s-e.value))
-                      #,(with-orig-stx-core (attribute v-e.value)))
+                       #,(with-orig-stx-core (attribute s-e.value))
+                       #,(with-orig-stx-core (attribute v-e.value)))
             #'orig-stx))
   (pattern (~and orig-stx (Set-empty? ~! s-e))
            #:do [(define tag
@@ -885,7 +939,7 @@ TODO?: Add binding arrows using DrRacket's API
             #`(Set-empty? #,tag #,(with-orig-stx-core (attribute s-e.value)))
             #'orig-stx))
 
-  ;;; Store expressions
+;;; Store expressions
   (pattern (~and orig-stx (Store-lookup ~! k-e))
            #:do [(define tag (add-reads (pesi k-e.value)))]
            #:attr value (with-orig-stx
@@ -896,7 +950,7 @@ TODO?: Add binding arrows using DrRacket's API
                  ((~and alloc-stx
                         (~or (~and SAlloc (~bind [allocer SAlloc]))
                              (~and MAlloc (~bind [allocer MAlloc])))) ~!
-                  space:id))
+                             space:id))
            #:attr value
            (with-orig-stx
             ((attribute allocer) allocs (syntax-e #'space))
@@ -937,8 +991,8 @@ TODO?: Add binding arrows using DrRacket's API
                                                    (Rvar #'v)
                                                    #`(Rvar 'v)
                                                    #'v))
-                                 #`(Term #,pure (Rvar 'v))
-                                 #'v)))
+                                       #`(Term #,pure (Rvar 'v))
+                                       #'v)))
 
 (define-syntax-class (BSC L bound-vars Ξ pun-space?)
   #:attributes (value new-scope interaction)
@@ -1286,6 +1340,11 @@ TODO?: Add binding arrows using DrRacket's API
   (define (recur e)
     (match e
       [(Let _ bscs body) `(Let ,(unparse-bscs L bscs) ,(recur body))]
+      [(Match _ d rules) `(Match ,(recur d) .
+                                 ,(for/list ([rule (in-list rules)])
+                                    (match (unparse-rule L rules)
+                                      [`(Rule ,_ ,lhs ,rhs ,bscs)
+                                       (list* lhs rhs bscs)])))]
       [(Term _ pat) `(Term ,(unparse-pattern L pat))]
       [(Boolean _ b) b]
       [(Store-lookup _ k) `(Store-lookup ,(recur k))]

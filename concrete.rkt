@@ -144,6 +144,11 @@ in the spaces.rkt format.
                     (λ (ρ store-spaces)
                        (expression-eval bexpr ρ store-spaces)))]
 
+    [(Match _ dexpr rules)
+     (for/fold ([acc ∅]) ([dres (in-set (expression-eval dexpr ρ store-spaces))])
+       (match-define (Result/effect dv store-spaces*) dres)
+       (set-union acc (internal-rule-eval store-spaces* rule dv)))]
+
     [(Term _ pat) (set (Result/effect (pattern-eval pat ρ) store-spaces))]
 
     [(In-Dom? _ m kexpr)
@@ -225,20 +230,24 @@ in the spaces.rkt format.
              (set-union acc (proc-bindings bindings ρ store-spaces*))
              acc))])))
 
-;; rule-eval : Rule Map[Symbol,DPattern] DPattern Map[Symbol,Meta-function] → ℘(DPattern)
-;; Evaluate a rule on some concrete term and return possible RHSs.
+;; rule-eval : Rule Map[Symbol,DPattern] DPattern Map[Symbol,Meta-function] → Optional[℘(DPattern)]
+;; Evaluate a rule on some concrete term and return possible RHSs (#f if none, since ∅ is stuck)
 (define (internal-rule-eval store-spaces rule d)
   (match-define (Rule name lhs rhs binding-side-conditions _) rule)
+  (define found? (box #f))
   (match (c/match lhs d ρ₀ store-spaces)
-    [#f ∅]
+    [#f #f]
     [ρ
-     (bindings-eval binding-side-conditions ρ store-spaces
-                    (λ (ρ store-spaces)
-                       (set (State (pattern-eval rhs ρ) store-spaces))))]))
+     (define results
+       (bindings-eval binding-side-conditions ρ store-spaces
+                      (λ (ρ store-spaces)
+                         (set-box! found? #t)
+                         (set (State (pattern-eval rhs ρ) store-spaces)))))
+     (and (unbox found?) results)]))
 
 (define (rule-eval rule st)
   (match-define (State d store-spaces) st)
-  (internal-rule-eval store-spaces rule d))
+  (or (internal-rule-eval store-spaces rule d) ∅))
 
 ;; TODO?: Add ability to do safety checks on input/output belonging to a
 ;;        specified Space.
@@ -248,5 +257,4 @@ in the spaces.rkt format.
       (trust/conc store-spaces argd)
       ;; Use the first rule that matches. Puns State as Result/effect.
       (for/or ([rule (in-list rules)])
-        (define res (internal-rule-eval store-spaces rule argd))
-        (and (not (set-empty? res)) res)))))
+        (internal-rule-eval store-spaces rule argd)))))

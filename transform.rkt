@@ -481,9 +481,16 @@ The key ideas:
       (match tm
         [(or (? Space?) (? Name?) (? Map-with?) (? Set-with?))
          (error 'abstract-rule "Rule RHS may not bind or match ~a" tm)]
-        [(variant (and v (Variant name _ trust-recursion? trust-construction?)) pats)
-         ;; TODO?: error/warn if space defining vname is trusted.
-         ;;        and/or have second tag trusting construction
+        [(variant (and v (Variant name _ _ trust-construction?)) pats)
+         ;; FIXME: update to use with-orig-stx and raise syntax error.
+         (unless (implies trust-recursion? trust-construction?)
+           (error 'check-and-rewrite-term
+                  "Variant in trusted recursive space does not have trusted construction: ~a" tm))
+         ;; When recursive and trusted, do not rewrite positions,
+         ;; but subterms without trust must be rewritten.
+         ;; When "current-variant" is #f, then nothing is rewritten.
+         (define checked-variant-name
+           (and (not trust-recursion?) name))
          (define len (vector-length pats))
          (define pats* (make-vector len))
          (define-values (rev-store-updates susi)
@@ -493,7 +500,8 @@ The key ideas:
                 [i (in-naturals)])
              (define vfield (Variant-field name i))
              (define-values (pat* store-updates* susi*)
-               (recur name (cons vfield rev-addr)
+               (recur checked-variant-name
+                      (cons vfield rev-addr)
                       (list vfield)
                       pat))
              (unsafe-vector-set! pats* i pat*)

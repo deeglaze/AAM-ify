@@ -253,6 +253,7 @@ Allow stores (special)
 ;; - (Store-lookup Expression)
 ;; - (If Expression Expression Expression)
 ;; - (Let List[Binding] Expression
+;; - (Match Expression List[Rule])
 ;; - (Equal Expression Expression)
 ;; - (Meta-function-call name Pattern)
 ;; - (SAlloc Symbol)
@@ -287,6 +288,7 @@ Allow stores (special)
 (struct If expression (g t e) #:transparent)
 (struct Equal expression (l r) #:transparent)
 (struct Let expression (bindings body-expr) #:transparent)
+(struct Match expression (discriminant rules) #:transparent)
 ;; If expecting a set, make an arbitrary choice.
 ;; Labelled to distinguish different answers when evaluating expressions.
 (struct Choose expression (label expr) #:transparent)
