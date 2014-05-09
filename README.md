@@ -42,29 +42,28 @@ ADDITIONAL FEATURES:
 * Addresses can be marked for pointer equality, or for equality to automatically dereference.
     * Addresses introduced by the AAM transformation are the latter kind, in the 'AAM address space.
 * finite functions (dictionaries) and sets are natively supported. The burden of ensuring associativity/commutivity of meta-functions on these data is left to the user.
+* pattern support for sets and maps
 
 PLANNED WISHLIST:
 -----
 * build an escape hatch for smarter lattices.
 * widening for control flow
-* automatic garbage collection in (to add) "weak maps" across address spaces.
+* automatic garbage collection in "weak maps."
   Addresses of different spaces can occur in mapped objects.
-* pattern support for sets and maps (currently we use side-conditions)
 * add a new "binding" form like When, only non-local. Failure leads to trying the next major rule.
 * Synthesize a better alloc skeleton with more user guidance/annotations.
 * Drop distinction between terms and expressions. Variant constructors and meta-functions inhabit same namespace.
+* Add annotation for trusted termination of meta-functions so the memo table isn't necessary.
+* Smarter abstraction of maps so that the CEK machine is automatically transformed into the CESK^*_t machine.
 
 UNPLANNED WISHLIST:
 ------
+* Arrow expanders (--> position in reduction-relation is expanded)
+* Hygienic macros in expressions
+* Predicative parametric polymorphism
 * a compiler to output specialized Racket code implementing an input language's semantics.
+  Take alloc syntax and partially evaluate?
 * a higher-level language with binding specifications, synthesized substitution and
   contextual matching that compiles to a closure-based semantics and reified continuations.
-
-
-SHOW-STOPPING FIXMEs:
------
-* We need to track positions where maps and sets flow, and what the expected spaces are,
-  so we can mark them as abstract (with pointer to cardinality analysis) or not when
-  constructing them.
 
 [1] Might and Shivers ICFP 2006 "Improving flow analyses via ΓCFA: Abstract garbage collection and counting"

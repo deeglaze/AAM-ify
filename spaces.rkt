@@ -125,12 +125,13 @@ Allow stores (special)
 ;; A rule is a (Rule Any Pattern Pattern List[Either[Binding,Side-condition]] Store-Interaction)
 ;; A Rule name is used for guiding allocation.
 
-(struct Rule (name lhs rhs binding-side-conditions store-interaction) #:transparent)
+(struct Rule (name lhs rhs binding-side-conditions) #:transparent)
 
 ;; A Pattern is one of
 ;; - a (Space Space)
 ;; - a (Name Symbol Pattern)
 ;; - an (Rvar Symbol)
+;; - a (Datum Literal-data)
 ;; - a (variant Variant Immutable-Vector[Pattern]) [morally]
 ;; - a (Set-with Pattern Pattern Match-mode) [for structural termination arguments]
 ;; - a (Sap-with QMap Pattern Pattern Pattern Match-mode) [for structural termination arguments]
@@ -154,6 +155,7 @@ Allow stores (special)
 (struct Map-with (kp vp mp mode) #:transparent)
 (struct Set-with (vp sp mode) #:transparent)
 (struct Rvar (x) #:transparent)
+(struct Datum (d) #:transparent)
 
 (define ρ₀ (hash))
 (define ∅ (set))
@@ -231,7 +233,7 @@ Allow stores (special)
        (fxior (match e
                 [(or (expression si)
                      (Meta-function _ _ si _ _)
-                     (Rule _ _ _ _ si)) si]
+                     (Rule _ _ _ (BSCS si _))) si]
                 [(? fixnum?) e]
                 [else (error 'combine "Expected value with store-interaction or fixnum ~a" e)])
               (recur es))])))
@@ -249,10 +251,9 @@ Allow stores (special)
 
 ;; An Expression is one of
 ;; - (Term Pattern)
-;; - (Boolean Boolean)
 ;; - (Store-lookup Expression)
 ;; - (If Expression Expression Expression)
-;; - (Let List[Binding] Expression
+;; - (Let BSCS Expression)
 ;; - (Match Expression List[Rule])
 ;; - (Equal Expression Expression)
 ;; - (Meta-function-call name Pattern)
@@ -276,7 +277,6 @@ Allow stores (special)
 ;; - (Set-Remove* Expression List[Expression])
 ;; - (Set-Intersect Expression List[Expression])
 ;; - (Set-Subtract Expression List[Expression])
-(struct Boolean expression (b) #:transparent)
 (struct Store-extend (key-expr val-expr trust-strong?) #:transparent)
 
 ;; Notes: The boolean in Map-extend is whether the map should remain a strong update through abstraction.
@@ -288,6 +288,7 @@ Allow stores (special)
 (struct If expression (g t e) #:transparent)
 (struct Equal expression (l r) #:transparent)
 (struct Let expression (bindings body-expr) #:transparent)
+  (struct BSCS expression (bindings) #:transparent) ;; non-expression
 (struct Match expression (discriminant rules) #:transparent)
 ;; If expecting a set, make an arbitrary choice.
 ;; Labelled to distinguish different answers when evaluating expressions.
@@ -312,6 +313,7 @@ Allow stores (special)
 
 (struct Unsafe-store-space-ref expression () #:transparent)
 (struct Unsafe-store-ref expression (space) #:transparent)
+(struct ??? expression (label) #:transparent)
 
 (struct SAlloc expression (space) #:transparent)
 (struct MAlloc expression (space) #:transparent)

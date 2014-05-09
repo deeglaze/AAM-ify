@@ -57,6 +57,7 @@ Utility functions and specific functions that are shared between concrete and ab
     [(variant var pats) (variant var (for/vector #:length (vector-length pats)
                                                  ([pat (in-vector pats)])
                                           (pattern-eval pat ρ)))]
+    [(? Datum?) pat]
     [(or (? Name?) (? Space?) (? Map-with?) (? Set-with?))
      (error 'pattern-eval "Cannot eval a binding pattern ~a" pat)]
     [atom atom]))
@@ -166,6 +167,7 @@ Utility functions and specific functions that are shared between concrete and ab
      (and (set? d)
           (for/and ([v (in-set d)]) (in-component? L comp v)))]
     [(? Address-Space?) #t]
+    [(? Datum? d*) (equal? d d*)]
     [_ (error 'in-component? "Bad component ~a" comp)]))
 
 ;; sexp-to-dpattern/check : S-exp Space-name Language → DPattern
@@ -241,7 +243,7 @@ Utility functions and specific functions that are shared between concrete and ab
            (for/list ([(k v) (in-dict d)])
              (list (dpattern->sexp k) (dpattern->sexp v))))]
     [(external _ v) v]
-    [atom atom]))
+    [(Datum atom) atom]))
 
 ;; Utility functions
 (define (set-add* s args)

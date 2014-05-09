@@ -34,7 +34,7 @@ TODO?: Add binding arrows using DrRacket's API
          define-metafunctions
          reify-language reify-metafunctions-of
          --> Setof Any where update
-         unparse-semantics
+         unparse-semantics unparse-language
          (for-syntax Lang))
 
 (define-syntax (--> stx) (raise-syntax-error #f "For use in Rule form" stx))
@@ -127,7 +127,9 @@ TODO?: Add binding arrows using DrRacket's API
            #`(Address-Egal #'#,space (if (syntax? addr)
                                          #`(syntax #,addr)
                                          addr))]
-          [atom #`'#,atom]))
+          [(Datum atom) #`(Datum '#,atom)]
+          [(Anything) #'-Anything]
+          [(Space name) #`(Space #'#,name)]))
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
      [_ (error 'quine-pat "Bad wos ~a" pat)]))
 
@@ -136,10 +138,11 @@ TODO?: Add binding arrows using DrRacket's API
      [(with-orig-stx v core stx)
       (define v*
         (match v
-          [(Rule name lhs rhs bscs si)
+          [(Rule name lhs rhs (BSCS si bscs))
            #`(Rule #,(and name #`#'#,name) #,(quine-pattern lhs) #,(quine-pattern rhs)
-                   (list . #,(map quine-bsc bscs))
-                   #,si)]
+                   (BSCS
+                    #,si
+                    (list . #,(map quine-bsc bscs))))]
           [_ (error 'quine-rule "Bad rule ~a" v)]))
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
      [_ (error 'quine-rule "Bad wos ~a" rule)]))
@@ -167,7 +170,7 @@ TODO?: Add binding arrows using DrRacket's API
           [(Map dom rng) #`(Map #,(quine-Component dom) #,(quine-Component rng))]
           [(℘ comp) #`(℘ #,(quine-Component comp))]
           [(or (? Anything?) (? Address-Space?)) core]
-          [(or (? number?) (? string?) (? char?) (? boolean?) (? null?) (? symbol?)) #`'#,v]
+          [(Datum atom) #`'#,atom]
           [other (error 'quine-Component "Bad component ~a" c)]))
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
      [_ (error 'quine-Component "Bad wos ~a" c)]))
@@ -179,9 +182,9 @@ TODO?: Add binding arrows using DrRacket's API
      (define v*
        (match v
          [(Term si p) #`(Term #,si #,(quine-pattern p))]
-         [(or (? Boolean?) (? Map-empty??)
+         [(or (? Map-empty??)
               (? Unsafe-store-ref?) (? Unsafe-store-space-ref?)
-              (? SAlloc?) (? MAlloc?) (? QSAlloc?) (? QMAlloc?))
+              (? SAlloc?) (? MAlloc?) (? QSAlloc?) (? QMAlloc?) (? ????))
           core]
 
          [(Empty-map si container)
@@ -201,7 +204,7 @@ TODO?: Add binding arrows using DrRacket's API
          [(Store-lookup si k) #`(Store-lookup #,si #,(do k))]
 
          [(If si g t e) #`(If #,si #,(do g) #,(do t) #,(do e))]
-         [(Let si bscs body) #`(Let #,si (list . #,(map quine-bsc bscs)) #,(do body))]
+         [(Let si bscs body) #`(Let #,si #,(quine-bscs bscs) #,(do body))]
          [(Match si d rules) #`(Match #,si #,(do d) (list . #,(map quine-rule rules)))]
          [(Equal si l r) #`(Equal #,si #,(do l) #,(do r))]
 
@@ -224,6 +227,16 @@ TODO?: Add binding arrows using DrRacket's API
          [other (error 'quine-expression "Bad expression ~a" other)]))
      #`(with-orig-stx #,v* #'#,core #'#,stx)]
     [_ (error 'quine-expression "Bad wos ~a" e)]))
+
+(define (quine-bscs bscs)
+  (match bscs
+    [(with-orig-stx v core stx)
+     (define v*
+       (match v
+         [(BSCS si bindings)
+          (define bindings* (map quine-bsc bindings))
+          #`(BSCS #,si (list . #,bindings*))]))
+     #`(with-orig-stx #,v* #'#,core #'#,stx)]))
 
  (define (quine-bsc bsc)
    (match bsc
@@ -267,7 +280,7 @@ TODO?: Add binding arrows using DrRacket's API
     Equal ;;
     Meta-function-call ;;
     Choose ;;
-    Match
+    Match ;;
 
     ;; Map expressions
     Map-lookup ;;
@@ -295,6 +308,7 @@ TODO?: Add binding arrows using DrRacket's API
     QMAlloc ;;
     Unsafe-store-ref ;;
     Unsafe-store-space-ref ;;
+    ???
     ))
 
  (define-literal-set component-lits
@@ -318,19 +332,15 @@ TODO?: Add binding arrows using DrRacket's API
   (pattern c:char #:attr value (syntax-e #'c)))
 
 (define-syntax-class literal-data
-  #:attributes (value)
+  #:attributes (value stx)
   (pattern (~and orig-stx
                  (~or a:atomic
                       ((~literal quote) (~or sym:id qa:atomic (~and () null)))))
-           #:do [(define v
-                   (or (attribute a.value)
-                       (attribute qa.value)
-                       (and (attribute sym) (syntax-e #'sym))
-                       (and (attribute null) '())))]
-           #:attr value (with-orig-stx
-                         v
-                         #'orig-stx
-                         #'orig-stx)))
+           #:attr value (or (attribute a.value)
+                            (attribute qa.value)
+                            (and (attribute sym) (syntax-e #'sym))
+                            (and (attribute null) '()))
+           #:attr stx #'orig-stx))
 
 ;; pats are passed in unparsed.
 ;; If expected-space is non-#f, we check that (vname . pats) matches the given space.
@@ -385,6 +395,8 @@ TODO?: Add binding arrows using DrRacket's API
        [itr
         (define s (with-orig-stx-v (free-id-table-iterate-value spaces itr)))
         (define-values (v ns nl?) (check-space s))
+        ;; Look for all matching definitions of the Variant name,
+        ;; and choose the tightest match (smallest in the refinement order)
         (define-values (bs* b* bns* bnl*)
           (cond
            [v
@@ -451,6 +463,13 @@ TODO?: Add binding arrows using DrRacket's API
 (define-syntax-class (Pattern L expected-space/component pattern? bound-vars pun-space?)
   #:literal-sets (pat-ids)
   #:attributes (value non-linear? new-scope)
+  (pattern (~and orig-stx l:literal-data)
+           #:attr value (with-orig-stx
+                         (Datum (attribute l.value))
+                         #`(Datum l.stx)
+                         #'orig-stx)
+           #:attr non-linear? #f
+           #:attr new-scope bound-vars)
   (pattern (~and orig-stx (Space (~var S (Space-ref L))))
            #:fail-unless (implies (attribute S.value)
                                   (expectations-agree?
@@ -597,7 +616,11 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr value (with-orig-stx (Space-reference #'space)
                                        #'(Space-reference 'space)
                                        #'space))
-  (pattern l:literal-data #:attr value (attribute l.value)))
+  (pattern (~and orig-stx l:literal-data)
+           #:attr value (with-orig-stx
+                         (Datum (attribute l.value))
+                         #'(Datum l.stx)
+                         #'orig-stx)))
 
 (define-syntax-class (Variant-cls Space-names trust-recursion? trust-construction?)
   #:attributes (value)
@@ -684,11 +707,14 @@ TODO?: Add binding arrows using DrRacket's API
                          (Term pure (attribute t.value))
                          #`(Term #,pure #,(with-orig-stx-core (attribute t.value)))
                          #'orig-stx))
-  (pattern (~and orig-stx v:boolean)
+  (pattern v:literal-data
            #:attr value (with-orig-stx
-                         (Boolean pure (syntax-e #'v))
-                         #`(Boolean #,pure v)
-                         #'orig-stx))
+                         (Term pure (with-orig-stx
+                                     (Datum (attribute v.value))
+                                     #'(Datum v.stx)
+                                     #'v.stx))
+                         #`(Term #,pure (Datum v.stx))
+                         #'v.stx))
 
 ;;; Map expressions
   (pattern (~and orig-stx (Map-lookup ~! m:id k-e (~optional (~seq #:default d-e))))
@@ -804,11 +830,17 @@ TODO?: Add binding arrows using DrRacket's API
   (pattern (~and orig-stx (Let ~! (~var bscs (Bindings L bound-vars Ξ pun-space?))
                                (~var body (Expression L (attribute bscs.new-scope) Ξ pun-space?))))
            #:do [(define tag (fxior (attribute bscs.interaction)
-                                    (pesi body.value)))]
+                                    (pesi body.value)))
+                 (define bscs-v
+                   (with-orig-stx
+                    (BSCS (attribute bscs.interaction) (attribute bscs.value))
+                    #`(BSCS #,(attribute bscs.interaction)
+                            (list . #,(map with-orig-stx-core (attribute bscs.value))))
+                    (map with-orig-stx-surface-stx (attribute bscs.value))))]
            #:attr value
-           (with-orig-stx (Let tag (attribute bscs.value) (attribute body.value))
+           (with-orig-stx (Let tag bscs-v (attribute body.value))
                           #`(Let #,tag
-                                 (list . #,(map with-orig-stx-core (attribute bscs.value)))
+                                 #,(with-orig-stx-core bscs-v)
                                  #,(with-orig-stx-core (attribute body.value)))
                           #'orig-stx))
   (pattern (~and orig-stx
@@ -819,7 +851,7 @@ TODO?: Add binding arrows using DrRacket's API
                                (~var bscs (Bindings L (attribute p.new-scope) Ξ pun-space?))])
                         ...))
            #:do [(define-values (rev-rhs si)
-                   (for/fold ([rev-rhs '()] [si (pesi d-e)])
+                   (for/fold ([rev-rhs '()] [si (pesi d-e.value)])
                        ([rhs (in-list (attribute rhs-raw))]
                         [bscsns (in-list (attribute bscs.new-scope))]
                         [bscssi (in-list (attribute bscs.interaction))])
@@ -835,12 +867,13 @@ TODO?: Add binding arrows using DrRacket's API
                               [bscsv (in-list (attribute bscs.value))]
                               [bscssi (in-list (attribute bscs.interaction))])
                      (with-orig-stx
-                      (Rule #f pat rhs bscsv bscssi)
+                      (Rule #f pat rhs (BSCS bscssi bscsv))
                       #`(Rule #f
                               #,(with-orig-stx-core pat)
                               #,(with-orig-stx-core rhs)
-                              (list . #,(map with-orig-stx-core bscsv))
-                              #,bscssi)
+                              (BSCS
+                               #,bscssi
+                               (list . #,(map with-orig-stx-core bscsv))))
                       rule-stx)))]
            #:attr value (with-orig-stx (Match si (attribute d-e.value) rules)
                                        #`(Match #,si
@@ -975,6 +1008,14 @@ TODO?: Add binding arrows using DrRacket's API
                          #`(Unsafe-store-ref #,pure 'space)
                          #'orig-stx))
 
+  (pattern (~and orig-stx
+                 (~or (~and ??? (~bind [label-stx #'"TODO"]))
+                      (??? label-stx:expr)))
+           #:attr value (with-orig-stx
+                         (??? pure (eval-syntax #'label-stx))
+                         #`(??? #,pure label-stx)
+                         #'orig-stx))
+
   (pattern (~and orig-stx (mf:id t))
            #:fail-unless (free-id-table-has-key? Ξ #'mf)
            (format "Meta-function not in scope ~a" (syntax-e #'mf))
@@ -983,6 +1024,7 @@ TODO?: Add binding arrows using DrRacket's API
                          #`(Meta-function-call #,read/write/alloc/many
                                                'mf #,(with-orig-stx-core (attribute t.value)))
                          #'orig-stx))
+
   ;; Common case is just referencing pattern variables, so make the term wrapping automatic.
   (pattern v:id
            #:fail-unless (free-id-table-has-key? bound-vars #'v)
@@ -1183,8 +1225,7 @@ TODO?: Add binding arrows using DrRacket's API
                  #`(Rule #,(and n #`'#,n)
                          #,(with-orig-stx-core l)
                          #,(with-orig-stx-core r)
-                         (list . #,(map with-orig-stx-core bsc))
-                         #,si)))]))
+                         (BSCS #,si (list . #,(map with-orig-stx-core bsc))))))]))
 
 (begin-for-syntax
  (define (name-is-constructor? L id)
@@ -1233,8 +1274,8 @@ TODO?: Add binding arrows using DrRacket's API
           (values (cons #`(Rule #f
                                 #,(quine-pattern l)
                                 #,(quine-pattern r)
-                                (list . #,(map quine-bsc bsc))
-                                #,si)
+                                (BSCS #,si
+                                 (list . #,(map quine-bsc bsc))))
                         rev-rules)
                   (fxior si overall-si))))
       (define trusted-si
@@ -1266,8 +1307,9 @@ TODO?: Add binding arrows using DrRacket's API
                                    #`(Rule #f
                                            #,(with-orig-stx-core l)
                                            #,(with-orig-stx-core r)
-                                           (list . #,(map with-orig-stx-core bsc))
-                                           #,si)))
+                                           (BSCS
+                                            #,si
+                                            (list . #,(map with-orig-stx-core bsc))))))
                          #,trusted-si
                          (?? conc #f)
                          (?? abs #f)))
@@ -1293,13 +1335,17 @@ TODO?: Add binding arrows using DrRacket's API
 
 (define (unparse-rule L rule)
   (match rule
-   [(Rule name lhs rhs bscs si)
+   [(Rule name lhs rhs bscs)
     `(Rule ,name
            ,(unparse-pattern L lhs)
            ,(unparse-pattern L rhs)
            ,(unparse-bscs L bscs))]))
 
 (define (unparse-semantics L R) (for/list ([rule (in-list R)]) (unparse-rule L rule)))
+(define (unparse-language L)
+  (match-define (Language spaces refinement-order) L)
+  `(Language ,(for/list ([(name space) (in-hash spaces)])
+                (list name (unparse-lang-space space)))))
 
 (define (unparse-pattern L p)
   (define (recur p)
@@ -1325,7 +1371,8 @@ TODO?: Add binding arrows using DrRacket's API
     [(Store-extend ae ve strong?) `(update ,(unparse-expression L ae) ,(unparse-expression L ve) ,strong?)]))
 
 (define (unparse-bscs L bscs)
-  (for/list ([bsc (in-list bscs)]) (unparse-bsc L bsc)))
+  (match-define (BSCS _ bindings) bscs)
+  (for/list ([bsc (in-list bindings)]) (unparse-bsc L bsc)))
 
 (define (unparse-space L S)
   (match S
@@ -1335,6 +1382,33 @@ TODO?: Add binding arrows using DrRacket's API
                     #:when (equal? S S*))
               name)
             `(could-not-unparse ,S))]))
+
+(define (unparse-lang-space S)
+  (match S
+    [(Space-reference name) name]
+    [(Address-Space space) `(Address-Space ,space)]
+    [(User-Space v-or-cs _ _)
+     `(User-Space . ,(for/list ([v-or-c (in-list v-or-cs)])
+                       (if (Variant? v-or-c)
+                           (unparse-Variant v-or-c)
+                           (unparse-Component v-or-c))))]
+    [(External-Space pred card prec ≡)
+     `(External-Space ,(object-name pred) ,(and card (object-name card)) ,prec ,(and ≡ (object-name ≡)))]))
+
+(define (unparse-Variant var)
+  (match var
+    [(Variant name comps _ _)
+     (cons name (for/list ([comp (in-vector comps)])
+                  (unparse-Component comp)))]))
+(define (unparse-Component comp)
+  (match comp
+    [(Space-reference name) name]
+    [(Map dom rng) `(Map ,(unparse-Component dom) ,(unparse-Component rng))]
+    [(QMap dom dprec rng) `(QMap ,(unparse-Component dom) ,dprec ,(unparse-Component rng))]
+    [(℘ comp) `(℘ ,(unparse-Component comp))]
+    [(? Anything?) '_]
+    [(Address-Space space) `(Address-Space ,space)]
+    [(Datum atom) atom]))
 
 (define (unparse-expression L e)
   (define (recur e)
@@ -1346,7 +1420,6 @@ TODO?: Add binding arrows using DrRacket's API
                                       [`(Rule ,_ ,lhs ,rhs ,bscs)
                                        (list* lhs rhs bscs)])))]
       [(Term _ pat) `(Term ,(unparse-pattern L pat))]
-      [(Boolean _ b) b]
       [(Store-lookup _ k) `(Store-lookup ,(recur k))]
       [(If _ g t e) `(If ,(recur g) ,(recur t) ,(recur e))]
       [(Equal _ l r) `(Equal ,(recur l) ,(recur r))]
@@ -1387,5 +1460,7 @@ TODO?: Add binding arrows using DrRacket's API
             (Set-Remove* _ s ss)
             (Set-Intersect _ s ss)
             (Set-Subtract _ s ss))
-       `(,(object-name e) ,(recur s) . ,(map recur ss))]))
+       `(,(object-name e) ,(recur s) . ,(map recur ss))]
+      [(??? _ label)
+       `(??? ,label)]))
   (recur e))

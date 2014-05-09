@@ -7,13 +7,17 @@ the declarations of state spaces and reduction rules.
 
 The key ideas:
 * use graphs algorithms to find recursive mentions of a space to change out with Addr
+* Spaces that are either a single map or are in their own SCC without self-reference
+  are treated as "aliases" rather than have their names be implicitly μ-bound.
+  This allows closures to have their environments' codomain be store-allocated rather than
+  the whole environment itself.
 * reduction relation can strongly update non-store functions (they will be made finite)
   maps with an abstract domain need cardinality analysis to do strong updates
 * all store updates are made weak
 * all store lookups are made non-deterministic
-* Recursive data structure construction sites are counted to inform alloc how many addresses to create.
-* ASSUMPTION: distinct addresses are desired for these syntactically distinct allocation points.
+* Recursive data structure construction sites are noted to inform alloc which addresses to create.
 
+FIXME: when a map is in a space that "later" needs a store lookup, how do we represent that? 
 |#
 
 (require graph
@@ -40,7 +44,7 @@ The key ideas:
 ;; distinguish space from reference to identify recursive spaces
 (struct Space-ref-node (sn) #:transparent)
 
-;; Spaces are represented as Pair[Space-name,Trusted?] to do error-checking.
+;; Spaces are represented as Space-node to do error-checking.
 ;; If two spaces with different trusted? booleans appear in the same scc, error.
 (define (add-space-nodes! G spaces)
   (for/fold ([h ρ₀]) ([(name space) (in-dict spaces)])
@@ -66,7 +70,7 @@ The key ideas:
             [endpoint (in-set (variant-or-component->endpoints name variant-or-component))])
        (match-define (Endpoint addr space) endpoint)
        (define space-node
-         (if (Address-Space? space)
+         (if (or (Address-Space? space) (Datum? space))
              space
              (match (hash-ref Space-nodes space
                         (λ () (error 'add-space-edges!
@@ -77,47 +81,60 @@ The key ideas:
        (add-directed-edge! G addr space-node))]
     [_ (void)]))
 
+(define (external-recursion? spaces S)
+  (match S
+    [(or (? Address-Space?) (? External-Space?)
+         (? Map?) (? QMap?)
+         (? Datum?))
+     #t]
+    [(Space-reference name) (external-recursion? spaces (hash-ref spaces name))]
+    [(User-Space (list C) _ _) (external-recursion? spaces C)]
+    [_ #f]))
+
 ;; language-recursive-spaces : Map[Space-name,Space] → Map[Space-name,Set[Space-Name]]
 ;; Map space names to set of space names that are mutually recursive with them.
 ;; Examples: List[A] = nil | (Cons A List[A]) ==> 'List |-> (set 'List)
 ;;           S-exp[A] = A | S-exps[A]
 ;;           S-exps[A] = nil | (Cons S-exp[A] S-exps[A]) ==> ['S-exp |-> #0=(set 'S-exp 'S-exps), 'S-exps |-> #0#]
 ;; NOTE: a space without Variants is not recursive since the recursion gets externalized.
-(define (language-recursive-spaces spaces)
-  (define LG (language-spaces->graph spaces))
+(define (language-recursive-spaces/aliases Lspaces)
+  (define LG (language-spaces->graph Lspaces))
   ;; Do a little error checking while discovering recursion.
   (define recursive-islands (scc LG))
-  (define (external-recursion? name)
-    (match (hash-ref spaces name)
-      [(or (? Address-Space?) (? External-Space?)) #t]
-      [(User-Space v-or-cs _ _)
-       (not (for/or ([v-or-c (in-list v-or-cs)]) (Variant? v-or-c)))]))
   ;; Make a map of Space-name to Set[spaces recursive with Space]
-  (for/fold ([h ρ₀]) ([cc (in-list recursive-islands)]
-                      #:unless (match cc
-                                 ;; The reference nodes themselves are administrative.
-                                 [(list (? Space-ref-node?)) #t] [_ #f]))
-      (define spaces
-        (for/set ([c (in-list cc)] #:when (Space-ref-node? c)) (Space-ref-node-sn c)))
-      (define space-names
-        (for/set ([space (in-set spaces)]) (Space-node-name space)))
-      (define-values (h* dummy0 dummy1)
-       (for/fold ([h h] [trust-rec 'unspecified] [trust-con 'unspecified])
-           ([space (in-set spaces)])
-         (match-define (Space-node _ ctrust-rec ctrust-con) space)
-         (cond [(and (or (eq? trust-rec 'unspecified) (equal? trust-rec ctrust-rec))
-                     (or (eq? trust-con 'unspecified) (equal? trust-con ctrust-con)))
-                (define name (Space-node-name space))
-                (values (if (external-recursion? name)
-                            h
-                            (hash-set h name space-names))
-                        ctrust-rec
-                        ctrust-con)]
-               [else
-                (error 'bad-trust "Recursive spaces have mismatched recursion trust ~a" cc)])))
-      h*))
+  (for/fold ([rec ρ₀] [alias ∅])
+      ([cc (in-list recursive-islands)]
+       #:unless (match cc
+                  ;; The reference nodes themselves are administrative.
+                  [(list (? Space-ref-node?)) #t] [_ #f]))
+    ;; each space is recursive with each ref'd space.
+    (define-values (spaces aliases)
+      (for*/fold ([spaces ∅] [aliases ∅])
+          ([c (in-list cc)]
+           #:when (Space-ref-node? c)
+           [sn (in-value (Space-ref-node-sn c))])
+        (define name (Space-node-name sn))
+        (if (external-recursion? Lspaces (Space-reference name))
+            (values spaces (set-add aliases name))
+            (values (set-add spaces sn) aliases))))
+    (define space-names
+      (for/set ([space (in-set spaces)]) (Space-node-name space)))
+    (define-values (rec* dummy0 dummy1)
+      (for/fold ([rec rec] [trust-rec 'unspecified] [trust-con 'unspecified])
+          ([space (in-set spaces)])
+        (match-define (Space-node _ ctrust-rec ctrust-con) space)
+        (cond [(and (or (eq? trust-rec 'unspecified) (equal? trust-rec ctrust-rec))
+                    (or (eq? trust-con 'unspecified) (equal? trust-con ctrust-con)))
+               (define name (Space-node-name space))
+               (values (hash-set rec name space-names)
+                       ctrust-rec
+                       ctrust-con)]
+              [else
+               (error 'bad-trust "Recursive spaces have mismatched recursion trust ~a" cc)])))
+      (values rec* (set-union alias aliases))))
+(trace language-recursive-spaces/aliases)
 
-(define (language-abstract-spaces-and-recursive-positions spaces recursive-spaces)
+(define (language-abstract-spaces-and-recursive-positions spaces recursive-spaces aliases)
   ;; Seed the abstract space map with defaults we know.
   (define abstract-spaces₀
     (for/fold ([h ρ₀]) ([(name space) (in-dict spaces)])
@@ -133,30 +150,9 @@ The key ideas:
   (define-values (variant-rec-addrs abstract-spaces₁)
     (for/fold ([rec-addrs ρ₀] [abstract-spaces abstract-spaces₀])
         ([(name space) (in-dict spaces)])
-      
-      (match space
-        [(or (? External-Space?) (? Address-Space?)) (values rec-addrs abstract-spaces)]
-        [(User-Space variants-or-components trust-recursion? trust-construction?)
-         (cond
-          [trust-recursion?
-           ;; All variants are mapped to ∅ to drive later "recursive replacements" to leave
-           ;; trusted spaces alone.
-           (values
-            (for/fold ([rec-addrs rec-addrs]) ([v/c (in-list variants-or-components)]
-                                               #:when (Variant? v/c))
-              (hash-set rec-addrs (Variant-name v/c) ∅))
-            abstract-spaces)]
-          [else
-           ;; update rec-addrs and abs-spaces for each variant/component in the space.
-           (for/fold ([rec-addrs rec-addrs]
-                      [abs-spaces abstract-spaces])
-               ([variant-or-component (in-list variants-or-components)])
-             (find-recursive-mentions recursive-spaces
-                                      name
-                                      variant-or-component
-                                      rec-addrs
-                                      abs-spaces))])])))
-
+      (find-recursive-mentions spaces recursive-spaces aliases
+                               rec-addrs abstract-spaces name space '())))
+  (printf "variant-rec-addrs ~a~%abstract-spaces₁ ~a~%" variant-rec-addrs abstract-spaces₁)
   ;; All spaces should now be classified as abstract or not.
   (define abstract-spaces
     (for/fold ([h abstract-spaces₁]) ([name (in-hash-keys abstract-spaces₁)])
@@ -185,11 +181,10 @@ The key ideas:
   ;; the recursive mention map.
 
   (match-define (Language spaces refinement-order) L)
-  (define recursive-spaces (language-recursive-spaces spaces))
+  (define-values (recursive-spaces aliases)
+    (language-recursive-spaces/aliases spaces))
   (define-values (abstract-spaces variant-rec-addrs)
-    (language-abstract-spaces-and-recursive-positions spaces recursive-spaces))
-
-  (printf "Recursive spaces ~a~%" recursive-spaces)
+    (language-abstract-spaces-and-recursive-positions spaces recursive-spaces aliases))
 
   ;; replace-recursive-mentions : Space-name (∪ Variant Component) → (∪ Variant Component)
   ;; With abstract spaces and recursive spaces computed, we can lift abstract maps to powerset codomain,
@@ -203,7 +198,9 @@ The key ideas:
     (define (replace-recursive-mentions-in-component comp)
       (match comp
         [(Space-reference name)
-         (if (set-member? (hash-ref recursive-spaces current-space ∅) name)
+         ;; FIXME: this should not include positions that are recursive solely through maps.
+         (if (and (set-member? (hash-ref recursive-spaces current-space ∅) name)
+                  (not (external-recursion? spaces (hash-ref spaces name))))
              (values (Address-Space 'AAM) #t)
              ;; Non-recursive references are not replaced, even if the spaces are abstract.
              (values comp
@@ -223,8 +220,7 @@ The key ideas:
          (cond [dom-abs? (values (QMap abs-dom #t (℘ abs-range)) #t)]
                [else (values (QMap abs-dom #f abs-range) rng-abs?)])]
 
-        [(Address-Space _) (values comp #t)]))
-    (trace replace-recursive-mentions-in-component)
+        [(or (? Address-Space?) (? Datum?)) (values comp #t)]))
 
     (match variant-or-component
       [(Variant name comps tr tc)
@@ -239,7 +235,6 @@ The key ideas:
        (define-values (abs-comp dummy)
          (replace-recursive-mentions-in-component comp))
        abs-comp]))
-  (trace replace-recursive-mentions)
 
    ;; Now replace recursive references with Address-Space and build a
    ;; Map[Variant-name,Set[Variant-address]] where the set is all the addresses of the
@@ -270,7 +265,14 @@ The key ideas:
            variant-rec-addrs
            abstract-spaces))
 
-;; find-recursive-mentions :
+(define (hash-set-if-unresolved h k v)
+    (match (hash-ref h k -unmapped)
+      [(? boolean?) h]
+      [_ (hash-set h k v)]))
+
+(define (find-recursive-mentions spaces recursive-spaces aliases rec-addrs
+                                 abstract-spaces current-space space rev-addr)
+  ;; find-recursive-mentions :
 ;;  Map[Space-name,Set[Space-name]] Space-name (∪ Variant Component) Map[Variant-name,Variant-Address] Rec-Space-Map →
 ;;    (values Map[Variant-name,Variant-Address] Rec-Space-Map)
 ;; Where Rec-Space-Map = Map[Space-name,(∪ Set[Space-name] Boolean)]
@@ -278,41 +280,51 @@ The key ideas:
 ;; Build a map of Variant name to addresses of recursive space references,
 ;; and a map of Space-name to Boolean (abstracted or not?) or a union of spaces of which, if abstract,
 ;; makes the key space abstract. All mutual dependencies are trusted, making the spaces non-abstract.
-(define (find-recursive-mentions recursive-spaces
-                                 current-space
-                                 variant-or-component
-                                 rec-addrs
-                                 abs-spaces)
-  (define (hash-set-if-unresolved h k v)
-    (match (hash-ref h k -unmapped)
-      [(? boolean?) h]
-      [_ (hash-set h k v)]))
+
   ;; Get the set of recursive mentions and fill out abstract-space dependencies.
   (define (find-recursive-mentions-in-component comp rev-addr abs-spaces)
+    (define (simple-name name)
+      (values ∅
+       (match (hash-ref abs-spaces name ∅)
+         [#t ;; known recursive (already set if trusted)
+          (hash-set-if-unresolved abs-spaces current-space #t)]
+         [#f abs-spaces] ;; known non-recursive
+         ;; unknown. Add to set of names to resolve after finishing.
+         [dependents
+          (cond
+           [(boolean? (hash-ref abs-spaces current-space -unmapped))
+            ;; Already showed current-space is abstract for a different reason.
+            ;; We don't know more about name here.
+            abs-spaces]
+           [(set? dependents)
+            ;; If name is abstract, then so is current-space.
+            (hash-join abs-spaces current-space (set-add dependents name))]
+           [else (error 'find-recursive-mentions-in-component
+                        "INTERNAL: expected boolean or set: ~v" dependents)])])))
+    ;; TODO: the derefencing pattern for abstract codomains leads to a choice
+    ;; between eager non-determinism and lazy-nondeterminism (with or without eager lookup).
+    ;; When not destructuring something that is a value, should it be dereferenced?
+    ;; Choose'd on?
     (match comp
       [(Space-reference name)
        (cond
+        [(set-member? aliases name)
+         (let find ([space-or-comp (hash-ref spaces name)] [last-name name])
+           (match space-or-comp
+             [(Space-reference name) (find (hash-ref spaces name) name)]
+             [(or (? Address-Space?) (? External-Space?))
+              (simple-name name)]
+             [(or (? Datum?) (? Map?) (? QMap?))
+              (find-recursive-mentions-in-component
+               space-or-comp rev-addr abs-spaces)]
+             [(User-Space (list C) _ _)
+              (find C last-name)]
+             [_ (error 'find-recursive-mentions-in-component
+                       "INTERNAL: bad alias ~a" space-or-comp)]))]
         [(set-member? (hash-ref recursive-spaces current-space ∅) name)
          (values (set (reverse rev-addr))
                  (hash-set-if-unresolved abs-spaces current-space #t))]
-        [else
-         (values ∅
-          (match (hash-ref abs-spaces name ∅)
-            [#t ;; known recursive (already set if trusted)
-             (hash-set-if-unresolved abs-spaces current-space #t)]
-            [#f abs-spaces] ;; known non-recursive
-            ;; unknown. Add to set of names to resolve after finishing.
-            [dependents
-             (cond
-              [(boolean? (hash-ref abs-spaces current-space -unmapped))
-               ;; Already showed current-space is abstract for a different reason.
-               ;; We don't know more about name here.
-               abs-spaces]
-              [(set? dependents)
-               ;; If name is abstract, then so is current-space.
-               (hash-join abs-spaces current-space (set-add dependents name))]
-              [else (error 'find-recursive-mentions-in-component
-                           "INTERNAL: expected boolean or set: ~v" dependents)])]))])]
+        [else (simple-name name)])]
       [(℘ comp)
        (find-recursive-mentions-in-component comp (cons '℘ rev-addr) abs-spaces)]
       [(Map domain range)
@@ -321,24 +333,48 @@ The key ideas:
        (define-values (rec-addresses* abs-spaces**)
          (find-recursive-mentions-in-component range (cons 'range rev-addr) abs-spaces*))
        (values (set-union rec-addresses rec-addresses*) abs-spaces**)]
-      [(? Address-Space?) (values ∅ (hash-set abs-spaces current-space #t))]))
+      [(or (? Address-Space?) (? Datum?)) (values ∅ (hash-set abs-spaces current-space #t))]))
+  (trace find-recursive-mentions-in-component)
 
-  (match variant-or-component
-    [(Variant name comps tr tc)
-     (for/fold ([rec-addrs* rec-addrs] [abs-spaces* abs-spaces])
-         ([comp (in-vector comps)]
-          [i (in-naturals)])
-       (define-values (rec-addresses abs-spaces**)
-         (find-recursive-mentions-in-component
-          comp (list (Variant-field name i)) abs-spaces*))
-       (values (hash-join rec-addrs* name rec-addresses)
-               abs-spaces**))]
-    [comp
-     (define-values (rec-addresses abs-spaces*)
-       (find-recursive-mentions-in-component comp '() abs-spaces))
-     ;; A recursive mention not under a variant must be under a map.
-     ;; Maps are ensured finite by the rest of the abstraction process.
-     (values rec-addrs abs-spaces*)]))
+  (define (find-recursive-mentions-in-v-or-c current-space
+                                             variant-or-component rec-addrs abs-spaces rev-addr)
+    (match variant-or-component
+      [(Variant name comps tr tc)
+       (for/fold ([rec-addrs* rec-addrs] [abs-spaces* abs-spaces])
+           ([comp (in-vector comps)]
+            [i (in-naturals)])
+         (define-values (rec-addresses abs-spaces**)
+           (find-recursive-mentions-in-component
+            comp (list (Variant-field name i)) abs-spaces*))
+         (values (hash-join rec-addrs* name rec-addresses)
+                 abs-spaces**))]
+      [comp
+       (define-values (rec-addresses abs-spaces*)
+         (find-recursive-mentions-in-component comp rev-addr abs-spaces))
+       ;; A recursive mention not under a variant must be under a map.
+       ;; Maps are ensured finite by the rest of the abstraction process.
+       (values rec-addrs abs-spaces*)]))
+
+  (match space
+    [(or (? External-Space?) (? Address-Space?)) (values rec-addrs abstract-spaces)]
+    [(User-Space variants-or-components trust-recursion? trust-construction?)
+     (cond
+      [trust-recursion?
+       ;; All variants are mapped to ∅ to drive later "recursive replacements" to leave
+       ;; trusted spaces alone.
+       (values
+        (for/fold ([rec-addrs rec-addrs]) ([v/c (in-list variants-or-components)]
+                                           #:when (Variant? v/c))
+          (hash-set rec-addrs (Variant-name v/c) ∅))
+        abstract-spaces)]
+      [else
+       ;; update rec-addrs and abs-spaces for each variant/component in the space.
+       (for/fold ([rec-addrs rec-addrs]
+                  [abs-spaces abstract-spaces])
+           ([variant-or-component (in-list variants-or-components)])
+         (find-recursive-mentions-in-v-or-c
+          current-space variant-or-component 
+          rec-addrs abs-spaces rev-addr))])]))
 
 ;; Resolve any left-over dependencies for abstraction.
 ;; When backchaining, fill out table with intermediate results.
@@ -370,7 +406,7 @@ The key ideas:
       [(Map domain range)
        (set-union (build domain (cons 'domain rev-addr))
                   (build range (cons 'range rev-addr)))]
-      [(? Address-Space?) (set (Endpoint (reverse rev-addr) comp))]
+      [(or (? Address-Space?) (? Datum?)) (set (Endpoint (reverse rev-addr) comp))]
       [_ (error 'component->endpoints "Bad component ~a" comp)])))
 
 ;; variant->endpoints : Variant → Set[Endpoint]
@@ -392,10 +428,10 @@ The key ideas:
 ;;  - we create a fresh Name (say B) and
 ;;  - add a binding to the rule (Binding Pat (Choose (Store-lookup (Term (Rvar B)))))
 ;;  - Repeat the process for Pat.
-(define (emit-binding-sc rec-addrs pat)
+(define (emit-binding-sc spaces rec-addrs pat)
   (define new-bvar (gensym))
   (if (variant? pat)
-      (let-values ([(pat* binding-scs si) (flatten-pattern rec-addrs pat '() #f)])
+      (let-values ([(pat* binding-scs si) (flatten-pattern spaces rec-addrs pat '() #f)])
         (values (Name new-bvar (Space (Address-Space 'AAM)))
                 (cons (Binding pat* (Choose read/many (gensym)
                                             (Store-lookup reads (Term pure (Rvar new-bvar)))))
@@ -407,12 +443,16 @@ The key ideas:
               read/many)))
 
 ;; flatten-pattern : Pattern Option[Set[List[Component-Address]]] → (values Pattern List[Binding-side-conditions])
-(define (flatten-pattern rec-addrs pat rev-addr [rec-positions #f])
-  (cond [(and rec-positions (set-member? rec-positions (reverse rev-addr)))
-         (emit-binding-sc rec-addrs pat)]
+(define (flatten-pattern spaces rec-addrs pat v-or-c rev-addr [rec-positions #f])
+  (cond [(and rec-positions
+              (let ([addr (reverse rev-addr)])
+                (and (set-member? rec-positions addr)
+                     ;; FIXME: incorrect. Need transformed maps' lookups to go through store.
+                     (not (external-recursion? spaces addr)))))
+         (emit-binding-sc spaces rec-addrs pat)]
         [else
          (match pat
-           [(variant (and v (Variant name _ _ _)) pats)
+           [(variant (and v (Variant name comps _ _)) pats)
             ;; Trusted spaces' variants are all given an empty set of recursive references.
             (define rec-positions (hash-ref rec-addrs name ∅))
             (define pats* (make-vector (vector-length pats)))
@@ -431,7 +471,7 @@ The key ideas:
                                      [_ #f]))
                     pos))
                 (define-values (pat* binding-scs* si*)
-                  (flatten-pattern rec-addrs pat (list (Variant-field name i)) indexed-addresses))
+                  (flatten-pattern spaces rec-addrs pat (list (Variant-field name i)) indexed-addresses))
                 (unsafe-vector-set! pats* i pat*)
                 (values (append (reverse binding-scs*) binding-scs)
                         (combine si si*))))
@@ -440,16 +480,27 @@ The key ideas:
                     si*)]
 
            [(Name x pat)
-            (define-values (pat* bscs* si*) (flatten-pattern rec-addrs pat rev-addr rec-positions))
+            (define-values (pat* bscs* si*) (flatten-pattern spaces rec-addrs pat rev-addr rec-positions))
             (values (Name x pat*) bscs* si*)]
 
-           ;; FIXME: recursive addresses assume only variants, but now we have recursive maps.
-           [(Map-with kpat vpat mpat mode)
+           [(Map-with kpat vpat mpat mode)            
             (define-values (kpat* kbscs* ksi*)
-              (flatten-pattern rec-addrs kpat (cons 'domain rev-addr) rec-positions))
-            (error 'flatten-pattern "TODO map-with")]
+              (flatten-pattern spaces rec-addrs kpat (cons 'domain rev-addr) rec-positions))
+            (define-values (vpat* vbscs* vsi*)
+              (flatten-pattern spaces rec-addrs vpat (cons 'range rev-addr) rec-positions))
+            (define-values (mpat* mbscs* msi*)
+              (flatten-pattern spaces rec-addrs vpat rev-addr rec-positions))
+            (values (Map-with kpat* vpat* mpat* mode)
+                    (append kbscs* vbscs* mbscs*)
+                    (combine ksi* vsi* msi*))]
            [(Set-with vpat spat mode)
-            (error 'flatten-pattern "TODO set-with")]
+            (define-values (vpat* vbscs* vsi*)
+              (flatten-pattern spaces rec-addrs vpat (cons '℘ rev-addr) rec-positions))
+            (define-values (spat* sbscs* ssi*)
+              (flatten-pattern spaces rec-addrs spat rev-addr rec-positions))
+            (values (Set-with vpat* spat* mode)
+                    (append vbscs* sbscs*)
+                    (combine vsi* ssi*))]
 
            [(Rvar x) (error 'flatten-pattern "Unexpected reference in match pattern ~a" x)]
            ;; XXX: good?
@@ -481,8 +532,8 @@ The key ideas:
       (match tm
         [(or (? Space?) (? Name?) (? Map-with?) (? Set-with?))
          (error 'abstract-rule "Rule RHS may not bind or match ~a" tm)]
-        [(variant (and v (Variant name _ _ trust-construction?)) pats)
-         ;; FIXME: update to use with-orig-stx and raise syntax error.
+        [(variant (and v (Variant name _ trust-recursion? trust-construction?)) pats)
+         ;; TODO: update to use with-orig-stx and raise syntax error.
          (unless (implies trust-recursion? trust-construction?)
            (error 'check-and-rewrite-term
                   "Variant in trusted recursive space does not have trusted construction: ~a" tm))
@@ -513,33 +564,39 @@ The key ideas:
         [other (values other '() pure)])]))
   (recur #f '() '() tm))
 
-(define (abstract-meta-function L rec-addrs ΞΔ mf)
+(define (abstract-meta-function spaces rec-addrs ΞΔ mf)
   (match-define (Meta-function name rules si t/conc t/abs) mf)
   (cond
    [t/abs mf]
    [else
     (define-values (rev-rules* si)
-      (for/fold ([rrules '()] [si pure]) ([rule (in-list rules)])
-        (define r (abstract-rule L rec-addrs ΞΔ rule))
+      (for/fold ([rrules '()] [si pure]) ([rule (in-list rules)]
+                                          [i (in-naturals)])
+        (define r (abstract-rule spaces
+                                 rec-addrs ΞΔ rule i (list name)))
         (values (cons r rrules) (combine si r))))
     (Meta-function name (reverse rev-rules*) si t/conc #f)]))
 
 ;; abstract-rule
-(define (abstract-rule L rec-addrs ΞΔ rule)
-  (match-define (Rule rule-name lhs rhs binding-side-conditions si) rule)
+(define (abstract-rule spaces rec-addrs ΞΔ rule rule-number [path '()])
+  (match-define (Rule rule-name lhs rhs (BSCS si binding-side-conditions)) rule)
 
   ;; Now we rewrite the LHS to non-deterministically choose values when it
   ;; pattern matches on recursive positions.
   ;; FIXME: Space patterns not replaced with their transformed versions.
   (define-values (lhs* lhs-binding-side-conditions lsi)
-    (flatten-pattern rec-addrs lhs '() #f))
+    (flatten-pattern spaces rec-addrs lhs '() #f))
+
+  (define rule-tag (or rule-name `(Rule ,rule-number)))
 
   ;; Finally we rewrite the binding side-conditions to go between the
   ;; lhs and rhs bindings/side-conditions
-  (define-values (binding-side-conditions* bscsi)
-    (abstract-bindings rec-addrs ΞΔ (list rule-name) binding-side-conditions
-                       (λ (bscs* si)
-                          (values (reverse bscs*) (combine lsi si)))))
+  (match-define (BSCS bscssi binding-side-conditions*)
+                (abstract-bindings spaces
+                                   rec-addrs ΞΔ (cons rule-tag path)
+                                   binding-side-conditions
+                                   (λ (bscs* si)
+                                      (BSCS (combine lsi si) bscs*))))
 
   ;; We now need to flatten the lhs pattern, and all patterns in binding-side-conditions.
   ;; The RHS pattern needs its recursive positions replaced with allocated addresses and
@@ -547,71 +604,61 @@ The key ideas:
 
   ;; First we check that no trusted recursive spaces have any variants constructed in rhs.
   (define-values (rhs* store-updates susi)
-    (check-and-rewrite-term rec-addrs rule-name rhs))
+    (check-and-rewrite-term rec-addrs (append path (list rule-tag 'RHS)) rhs))
 
   (define bscs* (append lhs-binding-side-conditions
                         binding-side-conditions*
                         store-updates))
-  (Rule rule-name lhs* rhs* bscs* (combine bscsi susi)))
+  (Rule rule-name lhs* rhs* (BSCS (combine bscssi susi) bscs*)))
 
-(define (abstract-bindings rec-addrs ΞΔ rev-addr bscs kont)
-  (define bind (bind* rec-addrs ΞΔ))
+(define (abstract-bindings spaces rec-addrs ΞΔ rev-addr bscs kont)
   (let let-recur ([bindings bscs] [i 0] [bindings* '()] [susi pure])
     (match bindings
-      ['() (kont bindings* susi)]
+      ['() (kont (reverse bindings*) susi)]
       [(cons binding bindings)
        (define (continue bindings* si)
          (let-recur bindings (add1 i) bindings* (combine si susi)))
        (match binding
          [(Binding pat expr)
-          (bind expr
-                (cons `(Let-binding ,i) rev-addr)
-                (λ (e*)
-                   (define-values (pat* bscs-for-pat* si*)
-                     (flatten-pattern rec-addrs pat '() #f))
-                   (continue (append (reverse (cons (Binding pat* e*) bscs-for-pat*))
-                                     bindings*)
-                             si*)))]
+          (define-values (pat* bscs-for-pat* si*)
+            (flatten-pattern spaces rec-addrs pat '() #f))
+          (define e* (abstract-expression* spaces rec-addrs ΞΔ expr (cons `(Let-binding ,i) rev-addr)))
+          (continue (append (reverse (cons (Binding pat* e*) bscs-for-pat*))
+                            bindings*)
+                    (combine si* e*))]
          [(Store-extend kexpr vexpr trust-strong?)
-          (bind kexpr
-                (cons `(Let-store-key ,i) rev-addr)
-                (λ (k*)
-                   (bind vexpr
-                         (cons `(Let-store-val ,i) rev-addr)
-                         (λ (v*)
-                            (continue (cons (Store-extend k* v* trust-strong?) bindings*)
-                                      (combine writes k* v*))))))]
+          (define k* (abstract-expression* spaces rec-addrs ΞΔ kexpr
+                                           (cons `(Let-store-key ,i) rev-addr)))
+          (define v* (abstract-expression* spaces rec-addrs ΞΔ vexpr
+                                           (cons `(Let-store-val ,i) rev-addr)))
+          (continue (cons (Store-extend k* v* trust-strong?) bindings*)
+                    (combine writes k* v*))]
          [(When expr)
-          (bind expr
-                (cons `(When-expr ,i) rev-addr)
-                (λ (w*) (continue (cons (When w*) bindings*)
-                                  (expression-store-interaction w*))))])])))
-
-;; Encapsulates a pattern in the following function. If recur on expr
-;; changes the store, then bind in a let (expresses sequencing), pass the reference to the value.
-(define ((bind* rec-addrs ΞΔ) expr path fn [name #f])
-  (define e* (abstract-expression* rec-addrs ΞΔ expr path))
-  (cond
-   [(writes? (expression-store-interaction e*))
-    (define var (if name (gensym name) (gensym 'intermediate)))
-    (define r (fn (Term pure (Rvar var))))
-    (Let (combine e* r)
-         (list (Binding (Avar var) e*))
-         r)]
-   [else (fn e*)]))
-
+          (define w* (abstract-expression* spaces rec-addrs ΞΔ expr
+                                           (cons `(When-expr ,i) rev-addr)))
+          (continue (cons (When w*) bindings*)
+                    (expression-store-interaction w*))])])))
 ;; abstract-expression
 ;; An EPattern must be abstracted so that Term expressions are rewritten and
 ;; stores are threaded through meta-function-call's.
 ;; After this, the binders in the LHS pattern get chosen from the abstract positions like in rules.
 ;; OPT-OP (ΞΔ): do analysis on meta-functions first to determine if they need to produce new stores,
 ;;              then only meta-function-call's that produce new stores get marked as changing store.
-(define (abstract-expression rec-addrs ΞΔ alloc-tag expr)
-  (abstract-expression* rec-addrs ΞΔ expr (list alloc-tag)))
+(define (abstract-expression spaces rec-addrs ΞΔ alloc-tag expr)
+  (abstract-expression* spaces rec-addrs ΞΔ expr (list alloc-tag)))
 
 ;; FIXME: some output store-interactions are wrong.
-(define (abstract-expression* rec-addrs ΞΔ expr rev-addr)
-  (define bind (bind* rec-addrs ΞΔ))
+(define (abstract-expression* spaces rec-addrs ΞΔ expr rev-addr)
+  (define (bind expr path fn [name #f])
+    (define e* (abstract-expression* spaces rec-addrs ΞΔ expr path))
+    (cond
+     [(writes? (expression-store-interaction e*))
+      (define var (if name (gensym name) (gensym 'intermediate)))
+      (define r (fn (Term pure (Rvar var))))
+      (Let (combine e* r)
+           (BSCS (combine e*) (list (Binding (Avar var) e*)))
+           r)]
+     [else (fn e*)]))
 
   (define (binary e₀ e₁ tag₀ tag₁ container [name₀ #f] [name₁ #f])
     (bind e₀ (cons tag₀ rev-addr)
@@ -630,7 +677,7 @@ The key ideas:
       ;; If no store updates, then no new store.
       (cond
        [(empty? store-updates) (Term pure pat*)]
-       [else (Let si store-updates (Term pure pat*))])]
+       [else (Let si (BSCS si store-updates) (Term pure pat*))])]
 
      [(Store-lookup _ kexpr)
       (bind kexpr
@@ -639,13 +686,15 @@ The key ideas:
                (define slsi (combine reads k*))
                (Choose (add-many slsi) (gensym) (Store-lookup slsi k*)))
             'key)]
-;; FIXME arg* not necessarily a pattern
+
      [(Meta-function-call _ name arg-pat)
-      (bind (Term pure arg-pat)
-            (cons 'MF-arg rev-addr)
-            (λ (arg*)
-               (define si (hash-ref ΞΔ name read/write/alloc/many))
-               (Meta-function-call si name arg*)))]
+      (define-values (pat* store-updates si)
+        (check-and-rewrite-term rec-addrs (reverse rev-addr) arg-pat))
+      (define mfsi (hash-ref ΞΔ name read/write/alloc/many))
+      (cond [(empty? store-updates)
+             (Meta-function-call mfsi name pat*)]
+            [else (Let si (BSCS si store-updates)
+                       (Meta-function-call mfsi name pat*))])]
 
      [(If _ g t e)
       (bind g
@@ -662,10 +711,11 @@ The key ideas:
      ;; Let is tricky since it might have rebindings of the store, which need to be forwarded as the
      ;; next store when translation goes forward.
 
-     [(Let _ bindings body)
+     [(Let _ (BSCS _ bindings) body)
       ;; In order to not get generated lets in let clauses,
       ;; we bind Binding RHSs to variables that then get matched against their pattern.
       (abstract-bindings
+       spaces
        rec-addrs
        ΞΔ
        rev-addr
@@ -678,8 +728,19 @@ The key ideas:
                   (cons 'Let-body rev-addr)
                   (λ (b*)
                      (Let (combine susi b*)
-                          (reverse bindings*)
+                          (BSCS susi bindings*)
                           b*)))])))]
+
+     [(Match _ dexpr rules)
+      (bind dexpr
+            (cons 'Match-discriminant rev-addr)
+            (λ (d*)
+               (define rules*
+                 (for/list ([rule (in-list rules)]
+                            [i (in-naturals)])
+                   (abstract-rule spaces rec-addrs ΞΔ rule i (cons 'Match-rule rev-addr))))
+               (Match (combine d* (apply combine rules*))
+                      d* rules*)))]
 
      [(Choose _ ℓ cexpr)
       (bind cexpr
@@ -731,12 +792,13 @@ The key ideas:
           (Set-Intersect _ sexpr vexprs)
           (Set-Union _ sexpr vexprs)
           (Set-Subtract _ sexpr vexprs))
-      (define-values (base container)
-        (cond [(Set-Add*? expr) (values 'Set-Add* Set-Add*)]
-              [(Set-Union? expr) (values 'Set-Union Set-Union)]
-              [(Set-Remove*? expr) (values 'Set-Remove* Set-Remove*)]
-              [(Set-Intersect? expr) (values 'Set-Intersect Set-Intersect)]
-              [(Set-Subtract? expr) (values 'Set-Subtract Set-Subtract)]))
+      (define container
+        (cond [(Set-Add*? expr) Set-Add*]
+              [(Set-Union? expr) Set-Union]
+              [(Set-Remove*? expr) Set-Remove*]
+              [(Set-Intersect? expr) Set-Intersect]
+              [(Set-Subtract? expr) Set-Subtract]))
+      (define base (object-name container))
       (define-values (base-tag arg-tag)
         (values (string->symbol (format "~a-set" base))
                 (string->symbol (format "~a-val" base))))
@@ -776,8 +838,8 @@ The key ideas:
      [(MAlloc si space)
       (QMAlloc allocs space (reverse rev-addr))]
 
-     [(or (? Boolean?) (? Unsafe-store-ref?) (? Unsafe-store-space-ref?)
-          (? QSAlloc?) (? QSAlloc?) (? Map-empty??))
+     [(or (? Unsafe-store-ref?) (? Unsafe-store-space-ref?)
+          (? QSAlloc?) (? QSAlloc?) (? Map-empty??) (? ????))
       expr]
      [_ (error 'abstract-expression "Bad expression ~a" expr)]))
   (recur expr rev-addr))

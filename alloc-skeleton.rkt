@@ -20,7 +20,7 @@
                  #,@(alloc-hints abs-rules)
                  #,@(for*/list ([mf (in-dict-values abs-Ξ)]
                                 #:unless (Meta-function-trusted-implementation/abs mf)
-                                [hint (in-list (alloc-hints (Meta-function-rules)))])
+                                [hint (in-list (alloc-hints (Meta-function-rules mf)))])
                       hint)))))
 
 ;; Create all the clauses for a user to fill in with better hints than the hint themselves.
@@ -37,11 +37,11 @@
     [(cons (Variant-field name idx) lst)
      (cons #`(unquote (Variant-field (quote #,name) #,idx)) (addr->syntax lst))]))
 
-(define (rules-hints rules)
+(define (rules-hints rules [rtail '()])
   (hint-map (λ (rule tail)
-               (match-define (Rule name lhs rhs bscs si) rule)
+               (match-define (Rule name lhs rhs (BSCS si bscs)) rule)
                (bscs-hints bscs tail))
-            rules '()))
+            rules rtail))
 
 (define (hint-map f lst tail)
   (match lst
@@ -72,13 +72,15 @@
      (expression-hints expr0 (if expr1 (expression-hints expr1 tail) tail))]
     [(If _ g t e)
      (expression-hints g (expression-hints t (expression-hints e tail)))]
-    [(Let _ bscs bexpr)
+    [(Let _ (BSCS _ bscs) bexpr)
      (bscs-hints bscs (expression-hints bexpr tail))]
+    [(Match _ expr rules)
+     (expression-hints expr (rules-hints rules tail))]
     [(or (Set-Union _ expr exprs)
          (Set-Add* _ expr exprs)
          (Set-Remove* _ expr exprs)
          (Set-Subtract _ expr exprs)
          (Set-Intersect _ expr exprs))
      (expression-hints expr (hint-map expression-hints exprs tail))]
-    [(or (? Term?) (? Empty-set?) (? Boolean?) (? Meta-function-call?)) tail]
+    [(or (? Term?) (? Empty-set?) (? Meta-function-call?) (? ????)) tail]
     [_ (error 'expression-hints "Unhandled expression ~a" expr)]))

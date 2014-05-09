@@ -147,7 +147,8 @@ in the spaces.rkt format.
     [(Match _ dexpr rules)
      (for/fold ([acc ∅]) ([dres (in-set (expression-eval dexpr ρ store-spaces))])
        (match-define (Result/effect dv store-spaces*) dres)
-       (set-union acc (internal-rule-eval store-spaces* rule dv)))]
+       (set-union acc (for/or ([rule (in-list rules)])
+                        (internal-rule-eval store-spaces* rule dv))))]
 
     [(Term _ pat) (set (Result/effect (pattern-eval pat ρ) store-spaces))]
 
@@ -233,7 +234,7 @@ in the spaces.rkt format.
 ;; rule-eval : Rule Map[Symbol,DPattern] DPattern Map[Symbol,Meta-function] → Optional[℘(DPattern)]
 ;; Evaluate a rule on some concrete term and return possible RHSs (#f if none, since ∅ is stuck)
 (define (internal-rule-eval store-spaces rule d)
-  (match-define (Rule name lhs rhs binding-side-conditions _) rule)
+  (match-define (Rule name lhs rhs (BSCS _ binding-side-conditions)) rule)
   (define found? (box #f))
   (match (c/match lhs d ρ₀ store-spaces)
     [#f #f]

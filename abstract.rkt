@@ -385,7 +385,7 @@ The abstract semantics differs from the concrete semantics in the following ways
            (answer-⊔1 acc
                     gchoice
                     (match g
-                      [(Boolean _ b) (if b (then) (else))]
+                      [(Datum b) (if b (then) (else))]
                       [(Abs-Data data)
                        (if (set-member? data #f)
                            (if (= (set-count data) 1)
@@ -396,7 +396,7 @@ The abstract semantics differs from the concrete semantics in the following ways
                       [_ (then)])))]
 
         ;; Really match-let
-        [(Let _ bindings bexpr)
+        [(Let _ (BSCS _ bindings) bexpr)
          (expr-eval-bindings
           ς bindings ρ store-spaces μ choices certain?
           (λ (ρ store-spaces μ choices certain?)
@@ -534,7 +534,7 @@ The abstract semantics differs from the concrete semantics in the following ways
                             (Abs-Result/effect vcertain? (to-data equalv) store-spaces** μ**))))]
               [else results])))]
 
-        [(Boolean _ b) (hash choices (Abs-Result/effect certain? b store-spaces μ))]
+        [(??? _ label) (error 'expr-eval "Reached unimplemented code ~a" label)]
 
         [bad (error 'expr-eval "Bad expression ~a" bad)])))
 
@@ -605,7 +605,7 @@ The abstract semantics differs from the concrete semantics in the following ways
   (mk-slow-eval-bindings set-eval-bindings ∅ set-union)
 
   (define (slow-rule-eval rule ς)
-    (match-define (Rule name lhs rhs binding-side-conditions store-interaction) rule)
+    (match-define (Rule name lhs rhs (BSCS store-interaction binding-side-conditions)) rule)
     (match-define (Abs-State d store-spaces μ τ̂) ς)
     (for/union ([dρ (in-match-results (a/match lhs d ρ₀ store-spaces μ))])
       (define ρ (match dρ [(May ρ) ρ] [ρ ρ]))
@@ -659,7 +659,7 @@ The abstract semantics differs from the concrete semantics in the following ways
   (let try-rules ([rules rules] [results answer⊥])
     (match rules
       ['() results]
-      [(cons (and rule (Rule name lhs rhs binding-side-conditions store-interaction)) rules)
+      [(cons (and rule (Rule name lhs rhs (BSCS store-interaction binding-side-conditions))) rules)
        (define found?-Ivar (box #f)) ;; only increases, thus a classic Ivar.
        (define results*
          (for/fold ([results results])
