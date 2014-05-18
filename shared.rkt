@@ -7,47 +7,38 @@ Utility functions and specific functions that are shared between concrete and ab
 (require racket/match racket/set racket/dict "spaces.rkt"
          racket/unit
          (only-in math/number-theory binomial)
-         racket/trace)
+         racket/trace
+         (for-syntax racket/base syntax/parse (only-in "spaces.rkt" debug-mode)))
 (provide unbound-map-error
          pattern-eval
          apply-reduction-relation
          apply-reduction-relation*
          apply-reduction-relation*/memo
-         apply-reduction-relation*/∇
-         store-ref store-set store-add weak-update-with-data strong-update-with-data
-         in-space? in-variant? in-component?
+         store-ref store-set store-op
+         in-space? in-component?
          hash-join
          hash-add
-         hash-union
          for/union
          for*/union
          set-add*
-         list-of-sets→set-of-lists
          sexp-to-dpattern/check
-         extract-set/container extract-map/container
-         dpattern->sexp)
+         dpattern->sexp
+         log-thread)
+
+(define-for-syntax (drop stx) #'(void))
+(define-syntax (make-debug-rename stx)
+  (syntax-parse stx
+    [(_ name:id x:id)
+     #`(begin
+         #,(if debug-mode
+               #'(define-syntax name (make-rename-transformer #'x))
+               #'(define-syntax name drop))
+         (provide name))]))
+(make-debug-rename dwhen when)
+(make-debug-rename dprintf printf)
+(make-debug-rename dtrace trace)
 
 (define (unbound-map-error who m) (λ () (error who "Map unbound ~a" m)))
-
-(define (extract-set/container v fail-msg)
-  (match v
-    [(? set? S) (values S values)]
-    [(abstract-set S) (values S abstract-set)]
-    [(discrete-set S) (values S discrete-set)]
-    [other
-     (when fail-msg
-      (log-info (format fail-msg other)))
-     (values #f #f)]))
-
-(define (extract-map/container v fail-msg)
-  (match v
-    [(? hash? map) (values map values)]
-    [(abstract-ffun map) (values map abstract-ffun)]
-    [(discrete-ffun map) (values map discrete-ffun)]
-    [other
-     (when fail-msg
-      (log-info (format fail-msg other)))
-     (values #f #f)]))
 
 ;; pattern-eval : Pattern Map[Symbol,DPattern] → DPattern
 ;; Concretize a pattern given an environment of bindings.
@@ -57,25 +48,27 @@ Utility functions and specific functions that are shared between concrete and ab
     [(variant var pats) (variant var (for/vector #:length (vector-length pats)
                                                  ([pat (in-vector pats)])
                                           (pattern-eval pat ρ)))]
-    [(? Datum?) pat]
-    [(or (? Name?) (? Space?) (? Map-with?) (? Set-with?))
+    [(or (? Datum?) (? boolean?)) pat]
+    [(or (? Name?) (? is-a?) (? Map-with?) (? Set-with?))
      (error 'pattern-eval "Cannot eval a binding pattern ~a" pat)]
     [atom atom]))
 
-(define ((apply-reduction-relation rule-eval rules) term)
-  (for/union ([rule (in-list rules)]) (rule-eval rule term)))
+(define (apply-reduction-relation rule-eval R)
+  (define rules (Reduction-Relation-rules R))
+  (λ (term)
+   (for/union ([rule (in-list rules)]) (rule-eval rule term))))
 
 (define (extend-indefinitely F x)
   (match (F x)
     [(? set-empty?) (set x)]
     [outs (for/union ([term* (in-set outs)]) (extend-indefinitely F term*))]))
 
-(define (apply-reduction-relation* rule-eval rules)
-  (define reduce (apply-reduction-relation rule-eval rules))
+(define (apply-reduction-relation* rule-eval R)
+  (define reduce (apply-reduction-relation rule-eval R))
   (λ (term) (extend-indefinitely reduce term)))
 
-(define (apply-reduction-relation*/memo rule-eval rules)
-  (define reduce (apply-reduction-relation rule-eval rules))
+(define (apply-reduction-relation*/memo rule-eval R)
+  (define reduce (apply-reduction-relation rule-eval R))
   (λ (term)
      (define seen (mutable-set))
      (let fix ([term term])
@@ -87,64 +80,27 @@ Utility functions and specific functions that are shared between concrete and ab
            [(? set-empty?) (set term)]
            [outs (for/union ([term* (in-set outs)]) (fix term*))])]))))
 
-(define (apply-reduction-relation*/∇ ⊔ rule-eval rules)
-  (define reduce (apply-reduction-relation rule-eval rules))
-  (λ (term)
-     (define seen (make-hash))
-     (define (seen-add! s)
-       (define τ̂ (Abs-State-τ̂ s))
-       (match (hash-ref seen τ̂ -unmapped)
-         [(== -unmapped eq?)
-          (hash-set! seen τ̂ s)
-          s]
-         [s-old
-          (define-values (s* changed?) (⊔ s s-old))
-          (cond [changed?
-                 (hash-set! seen τ̂ s*)
-                 s*]
-                [else #f])]))
-     (let fix ([term term])
-       (for* ([term* (in-set (reduce term))]
-              [term♯ (in-value (seen-add! term*))]
-              #:when term♯)
-         (fix term♯)))
-     seen))
-
 ;; in-space? : DPattern Language Space-name → Boolean
 ;; Decide whether a DPattern d is in Space space-name, which is defined in Language L.
 (define (in-space-ref? L space-name d)
-  (match-define (Language spaces _) L)
-  (define space
-    (hash-ref spaces space-name
-              (λ () (error 'in-space? "Undefined space ~a"
-                           space-name))))
-  (in-space? L space d))
-
-(define (in-variant? L var d)
-  (match-define (Variant name comps _ _) var)
-  (match d
-    [(variant (Variant (== name) _ _ _) ds)
-     ;; INVARIANT: variants with the same name have same length vectors.
-     (for/and ([comp (in-vector comps)]
-               [d (in-vector ds)])
-       (in-component? L comp d))]
-    [_ #f]))
+  (cond
+   [(eq? space-name 'Bool)
+    (boolean? d)]
+   [else
+    (define spaces (Language-spaces L))
+    (define space
+      (hash-ref spaces space-name
+                (λ () (error 'in-space? "Undefined space ~a"
+                             space-name))))
+    (in-space? L space d)]))
 
 (define (in-space? L space d)
-  (match-define (Language spaces _) L)
+  (define spaces (Language-spaces L))
   (match space
-    [(User-Space variants-or-components _ _)
-     (for/or ([var (in-list variants-or-components)])
-       (cond [(Variant? var) (in-variant? L var d)]
-             [(Space-reference? var) (in-space-ref? (Space-reference-name var) d)]
-             [else (in-component? L var d)]))]
-    [(Address-Space space)
-     (match d
-       [(or (Address-Structural (== space eq?) _)
-            (Address-Egal (== space eq?) _)) #t]
-       [_ #f])]
+    [(User-Space c _ _) (in-component? L c d)]
     ;; XXX: should external space predicates be allowed to return 'b.⊤?
-    [(External-Space pred _ _ _)
+    [(? External-Space?)
+     (define pred (External-Space-pred space))
      (match d
        [(external (== space) _) #t]
        [v (pred v)])]
@@ -152,44 +108,60 @@ Utility functions and specific functions that are shared between concrete and ab
 
 (define (in-component? L comp d)
   (match comp
-    [(Space-reference name) (in-space-ref? L name d)]
-    [(Map domain range)
+    [(∪ _ comps)
+     (for/or ([c (in-list comps)]) (in-component? L c d))]
+    [(Variant _ name comps _ _)
+     (match d
+       [(variant (Variant _ (== name) _ _ _) ds)
+        (for/and ([comp (in-vector comps)]
+                  [d (in-vector ds)])
+          (in-component? L comp d))]
+       [_ #f])]
+    [(? Space-reference?)
+     (in-space-ref? L (Space-reference-name comp) d)]
+    [(Map _ _ domain range)
      (define (check-map d)
        (for/and ([(k v) (in-dict d)])
          (and (in-component? L domain k)
               (in-component? L range v))))
      (match d
-       [(or (abstract-ffun m)
-            (discrete-ffun m)
-            (? dict? m)) (check-map m)]
+       [(ffun _ m) (check-map m)]
        [_ #f])]
-    [(℘ comp)
-     (and (set? d)
-          (for/and ([v (in-set d)]) (in-component? L comp v)))]
-    [(? Address-Space?) #t]
-    [(? Datum? d*) (equal? d d*)]
+    [(℘ _ _ comp)
+     (match d
+       [(fset _ S)
+        (for/and ([v (in-set S)]) (in-component? L comp v))]
+       [_ #f])]
+    [(Address-Space space match-behavior equal-behavior)
+     (match d
+       [(Address (== space eq?) _ (== match-behavior eq?) (== equal-behavior eq?)) #t]
+       [_ #f])]
+    [(? Bool?) (boolean? d)]
+    [(or (? Datum? d*) (? boolean? d*)) (equal? d d*)]
     [_ (error 'in-component? "Bad component ~a" comp)]))
+(dtrace in-component?)
 
 ;; sexp-to-dpattern/check : S-exp Space-name Language → DPattern
 ;; A minor parser from sexp to internal representation.
 ;; Any head-position constructor is considered a variant.
 ;; Ensure all variants exist in L.
 (define (sexp-to-dpattern/check sexp expected-space-name L)
-  (match-define (Language spaces _) L)
+  (define spaces (Language-spaces L))
   (define (component-sexp-to-dpat comp sexp)
     (match comp
-      [(℘ comp)
+      [(℘ _ _ comp)
        (unless (set? sexp)
          (error 'component-sexp-to-dpat "Expected a set of ~a given ~a" comp sexp))
        (for/set ([s (in-set sexp)])
          (component-sexp-to-dpat comp s))]
-      [(Map domain range)
+      [(Map _ _ domain range)
        (unless (dict? sexp)
          (error 'component-sexp-to-dpat "Expected a map from ~a to ~a given ~a" domain range sexp))
        (for/hash ([(k v) (in-dict sexp)])
          (values (component-sexp-to-dpat domain k)
                  (component-sexp-to-dpat range v)))]
-      [(Space-reference name) (space-to-dpat name sexp)]
+      [(? Space-reference?) (space-to-dpat (Space-reference-name comp) sexp)]
+      [(or (? ∪?) (? Variant?)) (error 'sexp-to-dpattern/check "Bitrot")]
       [_ (error 'component-sexp-to-dpat "Bad component ~a" comp)]))
 
   (define (space-to-dpat space-name sexp)
@@ -198,47 +170,20 @@ Utility functions and specific functions that are shared between concrete and ab
                 (λ () (error 'sexp-to-dpattern/check
                              "Expected space undefined ~a" space-name))))
     (match space
-      [(Address-Space space) (Address-Egal space sexp)] ;; An address may take any form.
-      [(External-Space pred _ _ _) (and (pred sexp) sexp)]
-      [(User-Space variants-or-components _ _)
-       (match sexp
-         [`(,(? symbol? head) . ,rest)
-          (let/ec break
-           (define var
-             (for/or ([v (in-list variants-or-components)])
-               (cond [(Variant? v)
-                      (and (eq? head (Variant-name v))
-                           v)]
-                     [(Space-reference? v)
-                      (with-handlers ([exn:fail? (λ (e) #f)])
-                        (break (space-to-dpat (Space-reference-name v) sexp)))]
-                     [else
-                      (with-handlers ([exn:fail? (λ (e) #f)])
-                        (break (component-sexp-to-dpat v sexp)))])))
-           (unless (Variant? var)
-             (error 'sexp-to-dpattern/check
-                    "Expected one of these variants ~a given ~a" variants-or-components sexp))
-           (define comps (Variant-Components var))
-           (define len (vector-length comps))
-           (unless (= len (length rest))
-             (error 'to-dpat "Variant components have arity mismatch. Given ~a expected ~a"
-                    rest (Variant-Components var)))
-           (define parsed-rest
-             (for/vector #:length len ([sexp (in-list rest)]
-                                       [comp (in-vector comps)])
-                         (component-sexp-to-dpat comp sexp)))
-           (variant var parsed-rest))]
-         [_ (error 'to-dpat "Expected a variant constructor in head position ~a" sexp)])]
+      [(Address-Space space emb eeb)
+       (Address space sexp
+                (or emb core-match-default)
+                (or eeb core-equal-default))] ;; An address may take any form.
+      [(? External-Space?) (and ((External-Space-pred space) sexp) sexp)]
+      [(User-Space c _ _) (component-sexp-to-dpat c sexp)]
       [_ (error 'space-to-dpat "Bad space ~a" space)]))
   (space-to-dpat expected-space-name sexp))
 
 (define (dpattern->sexp d)
   (match d
-    [(variant (Variant name _ _ _) ds)
+    [(variant (Variant _ name _ _ _) ds)
      (cons name (for/list ([d (in-vector ds)]) (dpattern->sexp d)))]
-    [(or (discrete-ffun d)
-         (abstract-ffun d)
-         (? dict? d))
+    [(ffun _ d)
      (cons 'make-hash
            (for/list ([(k v) (in-dict d)])
              (list (dpattern->sexp k) (dpattern->sexp v))))]
@@ -247,14 +192,8 @@ Utility functions and specific functions that are shared between concrete and ab
 
 ;; Utility functions
 (define (set-add* s args)
-  (for/fold ([s s]) ([arg (in-list args)]) (set-add s args)))
+  (for/fold ([s s]) ([arg (in-list args)]) (set-add s arg)))
 
-(define (list-of-sets→set-of-lists lst)
-  (match lst
-    [(cons s ss) (for*/set ([v (in-set s)]
-                            [lst (in-set (list-of-sets→set-of-lists ss))])
-                   (cons v lst))]
-    ['() (set '())]))
 (define-syntax-rule (for/union guard body ...)
   (for/fold ([acc ∅]) guard (set-union acc (let () body ...))))
 (define-syntax-rule (for*/union guard body ...)
@@ -262,13 +201,11 @@ Utility functions and specific functions that are shared between concrete and ab
 
 (define (hash-join h k v) (hash-set h k (set-union (hash-ref h k ∅) v)))
 (define (hash-add h k v) (hash-set h k (set-add (hash-ref h k ∅) v)))
-(define (hash-union h₀ h₁)
-  (for/fold ([h h₀]) ([(k vs) (in-hash h₁)]) (hash-join h k vs)))
+
 
 (define (store-ref store-spaces k)
   (match k
-    [(or (Address-Structural space addr)
-         (Address-Egal space addr))
+    [(Address space addr _ _)
      (hash-ref (hash-ref store-spaces space #hash())
                addr
                (λ () (error 'store-ref "Unmapped address ~a" k)))]
@@ -277,22 +214,23 @@ Utility functions and specific functions that are shared between concrete and ab
 (define (store-op who op)
   (λ (store-spaces k v)
      (match k
-       [(or (Address-Structural space addr)
-            (Address-Egal space addr))
+       [(Address space addr _ _)
         (hash-set store-spaces
                   space
                   (op (hash-ref store-spaces space #hash()) addr v))]
        [_ (error who "Bad address ~a" k)])))
+(define store-set (store-op 'store-set hash-set))
 
-(define (strong-update-with-data m k v)
-  (match v
-    [(Abs-Data S) (hash-set m k S)]
-    [singleton (hash-set m k (set singleton))]))
-
-(define (weak-update-with-data m k v)
-  (match v
-    [(Abs-Data S) (hash-join m k S)]
-    [singleton (hash-add m k singleton)]))
-
-(define store-set (store-op 'store-set strong-update-with-data))
-(define store-add (store-op 'store-add weak-update-with-data))
+(define-syntax log-thread
+  (syntax-parser
+    [(_ kind (~optional (~seq #:file path:expr (~bind [port (λ (p body)
+                                                               #`(call-with-output-file*
+                                                                  path
+                                                                  (λ (#,p) #,body)
+                                                                  #:exists 'replace))]))
+                        #:defaults ([port (λ (p body) #`(let ([#,p (current-output-port)]) #,body))])))
+     #`(let ([lr (make-log-receiver (current-logger) kind)])
+         (thread (λ ()
+                    #,((attribute port)
+                       #'p
+                       #'(let loop () (define vs (sync lr)) (write vs p) (newline p) (newline p) (loop))))))]))

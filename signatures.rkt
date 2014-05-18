@@ -10,7 +10,8 @@
   (L ;; Language
    alloc ;; State Map[Symbol,DPattern] [Any] → Any
    Ξ ;; Map[Symbol,Meta-function]
-   trace-update))
+   trace-update
+   R))
 
 ;; A Store-Space is a Map[Address-Space-Name,Map[Any,DPattern]]
 ;; An Abs-Count is a Map[Any,Card]
@@ -36,5 +37,4 @@
   (discrete-map-remove
    abstract-map-remove
    abstract-map-extend
-   map-extend
    a/map-remove))

@@ -5,20 +5,6 @@
          racket/unit
          racket/pretty racket/set racket/match)
 
-(define-syntax log-thread
-  (syntax-parser
-    [(_ kind (~optional (~seq #:file path:expr (~bind [port (λ (p body)
-                                                               #`(call-with-output-file*
-                                                                  path
-                                                                  (λ (#,p) #,body)
-                                                                  #:exists 'replace))]))
-                        #:defaults ([port (λ (p body) #`(let ([#,p (current-output-port)]) #,body))])))
-     #`(let ([lr (make-log-receiver (current-logger) kind)])
-         (thread (λ ()
-                    #,((attribute port)
-                       #'p
-                       #'(let loop () (define vs (sync lr)) (write vs p) (newline p) (newline p) (loop))))))]))
-
 (define (rule-lookup rules name)
   (for/or ([rule (in-list rules)] #:when (equal? name (Rule-name rule))) rule))
 

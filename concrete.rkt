@@ -7,7 +7,6 @@ in the spaces.rkt format.
 
 (require racket/match racket/set racket/dict racket/promise
          racket/list
-         racket/trace
          racket/unit
          "spaces.rkt"
          "shared.rkt"
@@ -25,7 +24,7 @@ in the spaces.rkt format.
 (define (c/match pattern data ρ store-spaces)
   (define (inner pattern data ρ)
     (match* (pattern data)
-      [((Space space-name) d)
+      [((is-a space-name) d)
        (cond
         [(in-space? L space-name d) ρ]
         [else
@@ -53,16 +52,18 @@ in the spaces.rkt format.
         [else (log-info "Match failure: variant mismatch ~a ~a" pattern data)
               #f])]
 
-      [((Map-with kpat vpat mpat mode) d)
+      [((Map-with kpat vpat mpat mode _) d)
        (error 'c/match "TODO Map-with")]
 
-      [((Set-with vpat spat mode) d)
+      [((Set-with vpat spat mode _) d)
        (error 'c/match "TODO Set-with")]
 
       [((? Rvar?) x) (error 'c/match "Unexpected reference in match pattern ~a" x)]
 
-      [((? Address-Structural? a₀) (? Address-Structural? a₁))
-       (inner (store-ref store-spaces a₀) (store-ref store-spaces a₁) ρ)]
+      [((and a₀ (Address space a _ 'Deref)) d)
+       (inner (store-ref store-spaces a₀) d)]
+      [(d (and a₁ (Address space a _ 'Deref)))
+       (inner d (store-ref store-spaces a₁))]
 
       [((? dict? m₀) (? dict? m₁))
        (and (= (dict-count m₀) (dict-count m₁))
@@ -87,82 +88,82 @@ in the spaces.rkt format.
 ;; due to Choose expressions.
 (define (expression-eval e ρ store-spaces)
   (match e
-    [(Store-lookup _ kexpr)
+    [(Store-lookup _ _ kexpr)
      (for/set ([kres (in-set (expression-eval kexpr ρ store-spaces))])
-       (match-define (Result/effect kv store-spaces*) kres)
-       (Result/effect (store-ref store-spaces kv) store-spaces*))]
-    [(Map-lookup _ m kexpr default? dexpr)
+       (match-define (State kv store-spaces*) kres)
+       (State (store-ref store-spaces kv) store-spaces*))]
+    [(Map-lookup _ _ m kexpr default? dexpr)
      (define ks (expression-eval kexpr ρ store-spaces))
      (define map (hash-ref ρ m (unbound-map-error 'map-ref m)))
      (for/fold ([res ∅]) ([kres (in-set ks)])
-       (match-define (Result/effect k store-spaces*) kres)
+       (match-define (State k store-spaces*) kres)
        (match (hash-ref map k -unmapped)
          [(== -unmapped eq?)
           (if default?
               (set-union res (expression-eval dexpr ρ store-spaces*))
               (error 'map-ref "Key unmapped in map ~a: ~a" m k))]
-         [v (set-add res (Result/effect v store-spaces*))]))]
-    [(Map-extend _ m kexpr vexpr _)
+         [v (set-add res (State v store-spaces*))]))]
+    [(Map-extend _ _ m kexpr vexpr _)
      (define mv (hash-ref ρ m (unbound-map-error 'map-ext m)))
      (define ks (expression-eval kexpr ρ store-spaces))
      (for/fold ([acc ∅])
          ([kres (in-set ks)])
-       (match-define (Result/effect k store-spaces*) kres)
+       (match-define (State k store-spaces*) kres)
        (for/fold ([acc acc]) ([vres (in-set (expression-eval vexpr ρ store-spaces*))])
-         (match-define (Result/effect v store-spaces**) vres)
-         (set-add acc (Result/effect (hash-set mv k v) store-spaces**))))]
-    [(Empty-map _ _) (set (Result/effect #hash() store-spaces))]
-    [(Map-empty? _ m)
-     (set (Result/effect
+         (match-define (State v store-spaces**) vres)
+         (set-add acc (State (hash-set mv k v) store-spaces**))))]
+    [(Empty-map _ _) (set (State #hash() store-spaces))]
+    [(Map-empty? _ _ m)
+     (set (State
            (eq? 0 (dict-count (hash-ref ρ m (unbound-map-error 'map-empty? m))))
            store-spaces))]
-    [(Map-remove _ m kexpr)
+    [(Map-remove _ _ m kexpr)
      (error 'c/expression-eval "TODO map-remove")]
 
-    [(Meta-function-call _ f arg)
+    [(Meta-function-call _ _ f arg)
      ;; meta-functions also have non-deterministic choice.
      (mf-eval store-spaces
               (hash-ref Ξ f (λ () (error "Unknown meta-function ~a" f)))
               (pattern-eval arg ρ))]
-    [(If _ g t e)
+    [(If _ _ g t e)
      (for/union ([bres (in-set (expression-eval g ρ store-spaces))])
-       (match-define (Result/effect b store-spaces*) bres)
+       (match-define (State b store-spaces*) bres)
        (if b
            (expression-eval t ρ store-spaces*)
            (expression-eval e ρ store-spaces*)))]
-    [(Equal _ l r)
+    [(Equal _ _ l r)
      (for/fold ([acc ∅])
          ([lres (in-set (expression-eval l ρ store-spaces))])
-       (match-define (Result/effect lv store-spaces*) lres)
+       (match-define (State lv store-spaces*) lres)
        (for/fold ([acc acc]) ([rres (in-set (expression-eval r ρ store-spaces*))])
-         (match-define (Result/effect rv store-spaces**) rres)
-         (set-add acc (Result/effect (equal? lv rv) store-spaces**))))]
+         (match-define (State rv store-spaces**) rres)
+         (set-add acc (State (equal? lv rv) store-spaces**))))]
 
     ;; Really let with non-linear pattern weirdness.
-    [(Let _ bindings bexpr)
+    [(Let _ _ bindings bexpr)
      (bindings-eval bindings ρ store-spaces
                     (λ (ρ store-spaces)
                        (expression-eval bexpr ρ store-spaces)))]
 
-    [(Match _ dexpr rules)
+    [(Match _ _ dexpr rules)
      (for/fold ([acc ∅]) ([dres (in-set (expression-eval dexpr ρ store-spaces))])
-       (match-define (Result/effect dv store-spaces*) dres)
+       (match-define (State dv store-spaces*) dres)
        (set-union acc (for/or ([rule (in-list rules)])
                         (internal-rule-eval store-spaces* rule dv))))]
 
-    [(Term _ pat) (set (Result/effect (pattern-eval pat ρ) store-spaces))]
+    [(Term _ _ pat) (set (State (pattern-eval pat ρ) store-spaces))]
 
-    [(In-Dom? _ m kexpr)
+    [(In-Dom? _ _ m kexpr)
      (define mv (hash-ref ρ m (unbound-map-error 'map-ext m)))
      (for/set ([kres (in-set (expression-eval kexpr ρ store-spaces))])
-       (match-define (Result/effect kv store-spaces*) kres)
-       (Result/effect (dict-has-key? mv kv) store-spaces*))]
+       (match-define (State kv store-spaces*) kres)
+       (State (dict-has-key? mv kv) store-spaces*))]
 
-    [(or (Set-Union _ set-expr exprs)
-         (Set-Add* _ set-expr exprs)
-         (Set-Remove* _ set-expr exprs)
-         (Set-Intersect _ set-expr exprs)
-         (Set-Subtract _ set-expr exprs))
+    [(or (Set-Union _ _ set-expr exprs)
+         (Set-Add* _ _ set-expr exprs)
+         (Set-Remove* _ _ set-expr exprs)
+         (Set-Intersect _ _ set-expr exprs)
+         (Set-Subtract _ _ set-expr exprs))
      (define set-op
        (cond [(Set-Union? e) set-union]
              [(Set-Add*? e) set-add]
@@ -170,39 +171,37 @@ in the spaces.rkt format.
              [(Set-Intersect? e) set-intersect]
              [(Set-Subtract? e) set-subtract]))
      (for/fold ([acc ∅]) ([sres (in-set (expression-eval set-expr ρ store-spaces))])
-       (match-define (Result/effect sv store-spaces*) sres)
+       (match-define (State sv store-spaces*) sres)
        (let do-set-op ([exprs exprs] [cur-set sv] [store-spaces store-spaces*])
          (match exprs
-           ['() (set-union acc (Result/effect cur-set store-spaces))]
+           ['() (set-union acc (State cur-set store-spaces))]
            [(cons expr exprs)
             (for/fold ([acc acc]) ([res (in-set (expression-eval expr ρ store-spaces))])
-              (match-define (Result/effect v store-spaces*) res)
+              (match-define (State v store-spaces*) res)
               (set-union acc
                          (do-set-op exprs (set-op cur-set v) store-spaces*)))])))]
 
-    [(In-Set? _ set-expr expr)
+    [(In-Set? _ _ set-expr expr)
      (for/fold ([acc ∅]) ([sres (in-set (expression-eval set-expr ρ store-spaces))])
-       (match-define (Result/effect sv store-spaces*) sres)
+       (match-define (State sv store-spaces*) sres)
        (for/fold ([acc acc]) ([res (in-set (expression-eval expr ρ store-spaces*))])
-         (match-define (Result/effect v store-spaces*) res)
-         (set-add acc (Result/effect (set-member? sv v) store-spaces*))))]
-    [(Empty-set _ _) (set (Result/effect ∅ store-spaces))]
+         (match-define (State v store-spaces*) res)
+         (set-add acc (State (set-member? sv v) store-spaces*))))]
+    [(Empty-set _ _) (set (State ∅ store-spaces))]
 
     ;; We get a set of results from expr. We expect these results to be sets.
     ;; We want to embody any (all) choices from these sets, so we flatten them into
     ;; a set of possible results.
-    [(Choose _ _ expr)
+    [(Choose _ _ _ expr)
      (for/fold ([acc ∅]) ([res (in-set (expression-eval expr ρ store-spaces))])
-       (match-define (Result/effect some-set store-spaces*) res)
+       (match-define (State some-set store-spaces*) res)
        (for/fold ([acc acc]) ([v (in-set some-set)])
-         (set-add acc (Result/effect v store-spaces*))))]
+         (set-add acc (State v store-spaces*))))]
 
-    [(or (MAlloc _ space) (QMAlloc _ space _))
-     (set (Result/effect (Address-Egal space (gensym)) store-spaces))]
-    [(or (SAlloc _ space) (QSAlloc _ space _))
-     (set (Result/effect (Address-Structural space (gensym)) store-spaces))]
+    [(Alloc _ _ space mb eb hint)
+     (set (State (Address space (gensym) mb eb) store-spaces))]
 
-    [(? boolean? b) (set (Result/effect b store-spaces))]
+    [(? Datum? d) (set (State d store-spaces))]
 
     [bad (error 'expr-eval "Bad expression ~a" bad)]))
 
@@ -213,20 +212,20 @@ in the spaces.rkt format.
       [(cons (Binding pat cexpr) bindings)
        (for/fold ([acc ∅])
            ([cres (in-set (expression-eval cexpr ρ store-spaces))])
-         (match-define (Result/effect cv store-spaces*) cres)
+         (match-define (State cv store-spaces*) cres)
          (match (c/match pat cv ρ store-spaces)
            [#f acc]
            [ρ* (set-union acc (proc-bindings bindings ρ* store-spaces*))]))]
       [(cons (Store-extend kexpr vexpr _) bindings)
        (for/fold ([acc ∅]) ([kres (in-set (expression-eval kexpr ρ store-spaces))])
-         (match-define (Result/effect kv store-spaces*) kres)
+         (match-define (State kv store-spaces*) kres)
          (for/fold ([acc acc]) ([vres (in-set (expression-eval vexpr ρ store-spaces*))])
-           (match-define (Result/effect vv store-spaces**) vres)
+           (match-define (State vv store-spaces**) vres)
            (set-union acc
                       (proc-bindings bindings ρ (store-set store-spaces kv vv)))))]
       [(cons (When cexpr) bindings)
        (for/fold ([acc ∅]) ([cres (in-set (expression-eval cexpr ρ store-spaces))])
-         (match-define (Result/effect cv store-spaces*) cres)
+         (match-define (State cv store-spaces*) cres)
          (if cv
              (set-union acc (proc-bindings bindings ρ store-spaces*))
              acc))])))
@@ -234,7 +233,7 @@ in the spaces.rkt format.
 ;; rule-eval : Rule Map[Symbol,DPattern] DPattern Map[Symbol,Meta-function] → Optional[℘(DPattern)]
 ;; Evaluate a rule on some concrete term and return possible RHSs (#f if none, since ∅ is stuck)
 (define (internal-rule-eval store-spaces rule d)
-  (match-define (Rule name lhs rhs (BSCS _ binding-side-conditions)) rule)
+  (match-define (Rule name lhs rhs (BSCS _ binding-side-conditions) _ _) rule)
   (define found? (box #f))
   (match (c/match lhs d ρ₀ store-spaces)
     [#f #f]
@@ -255,7 +254,7 @@ in the spaces.rkt format.
 (define (mf-eval store-spaces mf argd)
   (match-define (Meta-function name rules _ trust/conc _) mf)
   (if trust/conc
-      (trust/conc store-spaces argd)
-      ;; Use the first rule that matches. Puns State as Result/effect.
+      (trust/conc L store-spaces argd)
+      ;; Use the first rule that matches.
       (for/or ([rule (in-list rules)])
         (internal-rule-eval store-spaces rule argd)))))

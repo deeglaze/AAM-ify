@@ -17,12 +17,13 @@ identifiers for syntax errors.
 
 TODO?: Add binding arrows using DrRacket's API
 |#
-(require "spaces.rkt" "shared.rkt" racket/match
+(require "spaces.rkt" "space-ops.rkt" "shared.rkt" racket/match
+         "syntax-classes.rkt"
          (for-syntax
-
+          (only-in "lattices.rkt" pc⊔)
+          "typecheck.rkt"
           racket/pretty racket/trace
-
-          racket/base "spaces.rkt"
+          racket/base "spaces.rkt" "space-ops.rkt"
           racket/list
           racket/match racket/dict racket/set racket/promise racket/vector
           syntax/parse racket/syntax syntax/id-table
@@ -33,41 +34,24 @@ TODO?: Add binding arrows using DrRacket's API
          reduction-relation
          define-metafunctions
          reify-language reify-metafunctions-of
-         --> Setof Any where update
-         unparse-semantics unparse-language
-         (for-syntax Lang))
+         -->
+         Setof Any where update
+         (for-syntax Lang Options-cls quine-Options))
 
 (define-syntax (--> stx) (raise-syntax-error #f "For use in Rule form" stx))
-
-(define-syntax (Setof stx)
-  (raise-syntax-error #f "To be used as Component syntax" stx))
-
-(define-syntax (Any stx)
-  (raise-syntax-error #f "To be used as Component syntax" stx))
-
-(define-syntax (update stx)
-  (raise-syntax-error #f "To be used as binding syntax" stx))
-
-(define-syntax (where stx)
-  (raise-syntax-error #f "To be used as binding syntax" stx))
 
 (begin-for-syntax
  (define language-info (make-free-id-table))
  ;; Associate language id with free-id-table of metafunction names to mf values.
  (define language-meta-functions (make-free-id-table))
- (struct with-orig-stx (v core surface-stx) #:transparent)
 
- (define/match (unwrap-wos s) [((with-orig-stx s* _ _)) s*] [(_) s])
  (define (quine-space space)
    (match space
     [(with-orig-stx v core stx)
      (define v*
        (match v
-         [(User-Space variants trust-recursion? trust-construction?)
-          #`(User-Space (list #,@(for/list ([v-or-c (in-list variants)])
-                                   (if (Variant? (unwrap-wos v-or-c))
-                                       (quine-Variant v-or-c)
-                                       (quine-Component v-or-c))))
+         [(User-Space c trust-recursion? trust-construction?)
+          #`(User-Space #,(quine-Component c)
                         #,trust-recursion?
                         #,trust-construction?)]
          [(or (? External-Space?) (? Address-Space?)) core]
@@ -75,18 +59,11 @@ TODO?: Add binding arrows using DrRacket's API
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
     [_ (error 'quine-space "Bad wos ~a" space)]))
 
- ;;; FIXME: ensure type aliases don't cycle and make this diverge.
- (define (resolve-space spaces space fuel)
-   (if (eq? 0 fuel)
-       (raise-syntax-error #f "Circular space alias" space)
-       (match space
-         [(with-orig-stx v _ _)
-          (match v
-            [(Space-reference id) (resolve-space spaces (free-id-table-ref spaces id) (sub1 fuel))]
-            [(or (? User-Space?) (? External-Space?) (? Address-Space?)) space]
-            ;; non-reference components are unchecked.
-            [_ #f])]
-         [#f #f])))
+(define (quine-Options options)
+  (match options
+    [(Options pun-space? externalize? raise? missing? mb eb)
+     #`(Options #,pun-space? #,externalize? #,raise? #,missing? '#,mb '#,eb)]
+    [_ (error 'quine-Options "Bad options ~a" options)]))
 
  ;; Parsed values are comprised of syntax objects.
  (define (quine-pattern pat)
@@ -103,74 +80,81 @@ TODO?: Add binding arrows using DrRacket's API
           [(Rvar id)
            #`(with-orig-stx (Rvar #'#,id) #'#,core #'#,stx)]
           [(variant var pats)
-           #`(variant #,(quine-Variant var)
+           #`(variant #,(quine-Component var)
                       (vector #,@(for/list ([p (in-vector pats)])
                                    (quine-pattern p))))]
-          [(Set-with vpat spat mode)
-           #`(Set-with #,(quine-pattern vpat) #,(quine-pattern spat) '#,mode)]
-          [(Map-with kpat vpat mpat mode)
+          [(Set-with vpat spat mode spointer)
+           #`(Set-with #,(quine-pattern vpat) #,(quine-pattern spat) '#,mode
+                       #,(and spointer (quine-Component spointer)))]
+          [(Map-with kpat vpat mpat mode mpointer)
            #`(Map-with #,(quine-pattern kpat)
                        #,(quine-pattern vpat)
                        #,(quine-pattern mpat)
-                       '#,mode)]
-
-          [(abstract-ffun map) #`(abstract-ffun (hash #,@(quine-map map)))]
-          [(discrete-ffun map) #`(discrete-ffun (hash #,@(quine-map map)))]
-          [(? dict? map) #`(hash #,@(quine-map map))]
-          [(? set? pats)
-           #`(set #,@(for/list ([p (in-set pats)]) (quine-pattern p)))]
-          [(Address-Structural space addr)
-           #`(Address-Structural #'#,space #,(if (syntax? addr)
-                                                 #`(syntax #,addr)
-                                                 addr))]
-          [(Address-Egal space addr)
-           #`(Address-Egal #'#,space (if (syntax? addr)
-                                         #`(syntax #,addr)
-                                         addr))]
+                       '#,mode
+                       #,(and mpointer (quine-Component mpointer)))]
+          [(Anything* c) #`(Anything* #,(quine-Component c))]
+          [(? Anything?) #'-Anything]
+          [(is-a name) #`(is-a #'#,name)]
           [(Datum atom) #`(Datum '#,atom)]
-          [(Anything) #'-Anything]
-          [(Space name) #`(Space #'#,name)]))
+          [(? boolean? b) #`#,b]
+
+          ;; DPatterns
+          [(Address space addr match-behavior equal-behavior)
+           #`(Address #'#,space
+                      #,(if (syntax? addr) #`(syntax #,addr) addr)
+                      '#,match-behavior
+                      '#,equal-behavior)]
+          [(external E v) ;; FIXME: external spaces need a quine.
+           (define equine (External-Space-quine (with-orig-stx-v E)))
+           (unless equine
+             (error 'quine-pattern "Partially specified space requires a quine ~a" E))
+           #`(external #,(quine-space E) #,(equine v))]
+
+          [(Abs-Data Eh S)
+           #`(Abs-Data (hash . #,(for/fold ([acc '()]) ([(E ev) (in-hash Eh)])
+                                  (list* (quine-space E) (quine-pattern ev) acc)))
+                       #,(if (user-set? S)
+                             #`(mk-user-set . #,(for/list ([v (in-set S)]) (quine-pattern v)))
+                             (quine-pattern S)))]
+
+          [_ (error 'quine-pattern "Bad pattern ~a" pat)]))
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
-     [_ (error 'quine-pat "Bad wos ~a" pat)]))
+     [_ (error 'quine-pattern "Bad wos ~a" pat)]))
 
  (define (quine-rule rule)
    (match rule
      [(with-orig-stx v core stx)
       (define v*
         (match v
-          [(Rule name lhs rhs (BSCS si bscs))
+          [(Rule name lhs rhs (BSCS si bscs) lexpect rexpect)
            #`(Rule #,(and name #`#'#,name) #,(quine-pattern lhs) #,(quine-pattern rhs)
                    (BSCS
                     #,si
-                    (list . #,(map quine-bsc bscs))))]
+                    (list . #,(map quine-bsc bscs)))
+                   #,(and lexpect (quine-Component lexpect))
+                   #,(and rexpect (quine-Component rexpect)))]
           [_ (error 'quine-rule "Bad rule ~a" v)]))
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
      [_ (error 'quine-rule "Bad wos ~a" rule)]))
-
- (define (quine-Variant var)
-   (match var
-     [(with-orig-stx v core stx)
-      (define v*
-        (match v
-          [(Variant name comps tr? tc?)
-           #`(Variant #'#,name
-                      (vector #,@(for/list ([comp (in-vector comps)])
-                                   (quine-Component comp)))
-                      #,tr? #,tc?)]
-          [other (error 'quine-Variant "Bad variant ~a" other)]))
-      #`(with-orig-stx #,v* #'#,core #'#,stx)]
-     [_ (error 'quine-Variant "Bad wos ~a" var)]))
 
  (define (quine-Component c)
    (match c
      [(with-orig-stx v core stx)
       (define v*
         (match v
-          [(Space-reference name) #`(Space-reference #'#,name)]
-          [(Map dom rng) #`(Map #,(quine-Component dom) #,(quine-Component rng))]
-          [(℘ comp) #`(℘ #,(quine-Component comp))]
-          [(or (? Anything?) (? Address-Space?)) core]
-          [(Datum atom) #`'#,atom]
+          [(Map pc ex dom rng) #`(Map '#,pc #,ex #,(quine-Component dom) #,(quine-Component rng))]
+          [(℘ pc ex? comp) #`(℘ '#,pc #,ex? #,(quine-Component comp))]
+          [(∪ pc comps)
+           #`(∪ '#,pc
+                (list . #,(for/list ([c (in-list comps)]) (quine-Component c))))]
+          [(Variant pc name comps tr? tc?)
+           #`(Variant '#,pc #'#,name
+                      (vector . #,(for/list ([c (in-vector comps)])
+                                    (quine-Component c)))
+                      #,tr? #,tc?)]
+          [(Space-reference pc emb eeb name) #`(Space-reference '#,pc '#,emb '#,eeb #'#,name)]
+          [(Anything* c) #`(Anything* #,(quine-Component c))]
+          [(or (? Anything?) (? Address-Space?) (? Datum?) (? boolean?) (? Bool?)) core]
           [other (error 'quine-Component "Bad component ~a" c)]))
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
      [_ (error 'quine-Component "Bad wos ~a" c)]))
@@ -181,49 +165,61 @@ TODO?: Add binding arrows using DrRacket's API
      (define do quine-expression)
      (define v*
        (match v
-         [(Term si p) #`(Term #,si #,(quine-pattern p))]
+         [(Term si c p) #`(Term #,si #,(and c (quine-Component c)) #,(quine-pattern p))]
          [(or (? Map-empty??)
               (? Unsafe-store-ref?) (? Unsafe-store-space-ref?)
-              (? SAlloc?) (? MAlloc?) (? QSAlloc?) (? QMAlloc?) (? ????))
+              (? Alloc?) (? ????))
           core]
 
-         [(Empty-map si container)
-          #`(Empty-map #,si #,(match container
-                                [(== values eq?) #'values]
-                                [(== abstract-ffun eq?) #'abstract-ffun]
-                                [(== discrete-ffun eq?) #'discrete-ffun]
-                                [_ (quine-expression container)]))]
-         [(Map-lookup si m k d? d)
-          #`(Map-lookup #,si '#,m #,(do k) #,d? #,(and d? (do d)))]
-         [(Map-extend si m k v strong?)
-          #`(Map-extend #,si '#,m #,(do k) #,(do v) #,strong?)]
-         [(Map-remove si m k)
-          #`(Map-remove #,si '#,m #,(do k))]
-         [(In-Dom? si m k) #`(In-Dom? #,si '#,m #,(do k))]
+         [(Empty-map si c)
+          #`(Empty-map #,si #,(quine-Component c))]
+         [(Map-lookup si c m k d? d)
+          #`(Map-lookup #,si #,(and c (quine-Component c))
+                        '#,m #,(do k) #,d? #,(and d? (do d)))]
+         [(Map-extend si c m k v strong?)
+          #`(Map-extend #,si #,(and c (quine-Component c))
+                        '#,m #,(do k) #,(do v) #,strong?)]
+         [(Map-remove si c m k)
+          #`(Map-remove #,si #,(and c (quine-Component c)) '#,m #,(do k))]
+         [(In-Dom? si c m k)
+          #`(In-Dom? #,si -Bool '#,m #,(do k))]
 
-         [(Store-lookup si k) #`(Store-lookup #,si #,(do k))]
+         [(Store-lookup si c k)
+          #`(Store-lookup #,si #,(and c (quine-Component c)) #,(do k))]
 
-         [(If si g t e) #`(If #,si #,(do g) #,(do t) #,(do e))]
-         [(Let si bscs body) #`(Let #,si #,(quine-bscs bscs) #,(do body))]
-         [(Match si d rules) #`(Match #,si #,(do d) (list . #,(map quine-rule rules)))]
-         [(Equal si l r) #`(Equal #,si #,(do l) #,(do r))]
+         [(If si c g t e)
+          #`(If #,si #,(and c (quine-Component c))
+                #,(do g) #,(do t) #,(do e))]
+         [(Let si c bscs body)
+          #`(Let #,si #,(and c (quine-Component c)) #,(quine-bscs bscs) #,(do body))]
+         [(Match si c d rules)
+          #`(Match #,si #,(and c (quine-Component c))
+                   #,(do d) (list . #,(map quine-rule rules)))]
+         [(Equal si c l r)
+          #`(Equal #,si -Bool #,(do l) #,(do r))]
 
-         [(Set-Union si s vs) #`(Set-Union #,si #,(do s) (list #,@(map do vs)))]
-         [(Set-Add* si s vs) #`(Set-Add* #,si #,(do s) (list #,@(map do vs)))]
-         [(Set-Remove* si s vs) #`(Set-Remove* #,si #,(do s) (list #,@(map do vs)))]
-         [(Set-Subtract si s vs) #`(Set-Subtract #,si #,(do s) (list #,@(map do vs)))]
-         [(Set-Intersect si s ss) #`(Set-Intersect #,si #,(do s) (list #,@(map do ss)))]
-         [(In-Set? si s v) #`(In-Set? #,si #,(do s) #,(do v))]
-         [(Set-empty? si s) #`(Set-empty? #,si #,(do s))]
-         [(Empty-set si container)
-          #`(Empty-set #,si #,(match container
-                                [(== values eq?) #'values]
-                                [(== abstract-set eq?) #'abstract-set]
-                                [(== discrete-set eq?) #'discrete-set]
-                                [_ (quine-expression container)]))]
+         [(or (Set-Union si c s vs)
+              (Set-Add* si c s vs)
+              (Set-Remove* si c s vs)
+              (Set-Subtract si c s vs)
+              (Set-Intersect si c s vs))
+          (define head
+            (cond
+             [(Set-Union? v) #'Set-Union]
+             [(Set-Add*? v) #'Set-Add*]
+             [(Set-Remove*? v) #'Set-Remove*]
+             [(Set-Subtract? v) #'Set-Subtract]
+             [(Set-Intersect? v) #'Set-Intersect]))
+          #`(#,head #,si #,(and c (quine-Component c))
+                    #,(do s) (list #,@(map do vs)))]
+         [(In-Set? si c s v) #`(In-Set? #,si -Bool #,(do s) #,(do v))]
+         [(Set-empty? si c s) #`(Set-empty? #,si -Bool #,(do s))]
+         [(Empty-set si comp)
+          #`(Empty-set #,si #,(quine-Component comp))]
 
-         [(Meta-function-call si name p)
-          #`(Meta-function-call #,si #'#,name #,(quine-pattern p))]
+         [(Meta-function-call si c name p)
+          #`(Meta-function-call #,si #,(and c (quine-Component c))
+                                #'#,name #,(quine-pattern p))]
          [other (error 'quine-expression "Bad expression ~a" other)]))
      #`(with-orig-stx #,v* #'#,core #'#,stx)]
     [_ (error 'quine-expression "Bad wos ~a" e)]))
@@ -235,7 +231,8 @@ TODO?: Add binding arrows using DrRacket's API
        (match v
          [(BSCS si bindings)
           (define bindings* (map quine-bsc bindings))
-          #`(BSCS #,si (list . #,bindings*))]))
+          #`(BSCS #,si (list . #,bindings*))]
+         [_ (error 'quine-bscs "Bad BSCS ~a" v)]))
      #`(with-orig-stx #,v* #'#,core #'#,stx)]))
 
  (define (quine-bsc bsc)
@@ -255,842 +252,6 @@ TODO?: Add binding arrows using DrRacket's API
       #`(with-orig-stx #,v* #'#,core #'#,stx)]
      [_ (error 'quine-bsc "Bad wos ~a" bsc)]))
 
- (define (list-order< lst v0 v1 [cmp equal?])
-   (match lst
-     ['() (error 'list-order< "Expected elements to be in list ~a ~a" v0 v1)]
-     [(cons v lst)
-      (cond [(cmp v v0) #t]
-            [(cmp v v1) #f]
-            [else (list-order< lst v0 v1 cmp)])]))
-
- (define (free-id-table-has-key? t k)
-   (not (eq? (free-id-table-ref t k -unmapped) -unmapped)))
-
- (define-syntax-class (Space-ref L)
-   #:attributes (value)
-   (pattern space-name:id
-            #:do [(define spacev (free-id-table-ref (Language-spaces L) #'space-name -unmapped))]
-            #:fail-when (eq? -unmapped spacev) (format "Unknown space ~a" (syntax-e #'space-name))
-            #:attr value spacev))
-
- (define-literal-set expr-ids
-   (Term ;;
-    If ;;
-    Let ;;
-    Equal ;;
-    Meta-function-call ;;
-    Choose ;;
-    Match ;;
-
-    ;; Map expressions
-    Map-lookup ;;
-    Map-extend ;;
-    Map-remove ;;
-    Map-empty? ;;
-    In-Dom? ;;
-    Empty-map ;;
-
-    ;; Set expressions
-    Set-empty? ;;
-    Empty-set ;;
-    Set-Union ;;
-    Set-Add* ;;
-    Set-Intersect ;;
-    Set-Subtract ;;
-    Set-Remove* ;;
-    In-Set? ;;
-
-    ;; Store expressions
-    Store-lookup ;;
-    SAlloc ;;
-    MAlloc ;;
-    QSAlloc ;;
-    QMAlloc ;;
-    Unsafe-store-ref ;;
-    Unsafe-store-space-ref ;;
-    ???
-    ))
-
- (define-literal-set component-lits
-   (Address-Space ℘ Setof Map Any))
-
-(define-literal-set pat-ids
-  (Name
-   Space
-   Rvar
-   variant
-   Map-with
-   Set-with))
-(define pat-reserved? (literal-set->predicate pat-ids))
-(define comp-reserved? (literal-set->predicate component-lits))
-
-(define-syntax-class atomic
-  #:attributes (value)
-  (pattern n:number #:attr value (syntax-e #'n))
-  (pattern s:str #:attr value (syntax-e #'s))
-  (pattern b:boolean #:attr value (syntax-e #'b))
-  (pattern c:char #:attr value (syntax-e #'c)))
-
-(define-syntax-class literal-data
-  #:attributes (value stx)
-  (pattern (~and orig-stx
-                 (~or a:atomic
-                      ((~literal quote) (~or sym:id qa:atomic (~and () null)))))
-           #:attr value (or (attribute a.value)
-                            (attribute qa.value)
-                            (and (attribute sym) (syntax-e #'sym))
-                            (and (attribute null) '()))
-           #:attr stx #'orig-stx))
-
-;; pats are passed in unparsed.
-;; If expected-space is non-#f, we check that (vname . pats) matches the given space.
-;; Otherwise, we find the most suitable Variant in the language. If multiple Variant values
-;; match, we choose the most general one according to the user's specification of a refinement order.
-;; If there is no given order, we raise an error.
-(define (find-suitable-variant L orig-stx expected-space vname pats pattern? bound-vars pun-space?)
-  (define (check-space s [on-fail (λ () (values #f #f #f))])
-    (match s
-      [(User-Space v-or-cs _ _)
-       (let search ([v-or-cs v-or-cs])
-         (match v-or-cs
-           ['() (on-fail)]
-           [(cons (and v/orig
-                       (with-orig-stx
-                        (and v (Variant (== vname free-identifier=?) _ _ _))
-                        core _))
-                  v-or-cs)
-            (syntax-parse pats
-              [(~var ps (Patterns L (vector->list (Variant-Components v)) pattern? bound-vars
-                                  pun-space?))
-               (values
-                (with-orig-stx (variant v/orig (list->vector (attribute ps.values)))
-                               #`(variant #,core
-                                          (vector #,@(map with-orig-stx-core (attribute ps.values))))
-                               orig-stx)
-                (attribute ps.new-scope)
-                (attribute ps.non-linear?))]
-              [_ (search v-or-cs)])]
-           [(cons _ v-or-cs) (search v-or-cs)]))]
-      [_ (on-fail)]))
-  (cond
-   [expected-space
-    (define expected-space*
-      (if (with-orig-stx? expected-space)
-          (with-orig-stx-v expected-space)
-          expected-space))
-    (define (fail)
-      (raise-syntax-error
-       #f
-       (format "Variant pattern did not match expected space (~a)" expected-space*)
-       orig-stx))
-    (check-space expected-space* fail)]
-   [else
-    (match-define (Language spaces order) L)
-    (let search ([itr (free-id-table-iterate-first spaces)]
-                 [best-space #f]
-                 [best #f]
-                 [best-new-scope #f]
-                 [best-non-linear? #f])
-      (cond
-       [itr
-        (define s (with-orig-stx-v (free-id-table-iterate-value spaces itr)))
-        (define-values (v ns nl?) (check-space s))
-        ;; Look for all matching definitions of the Variant name,
-        ;; and choose the tightest match (smallest in the refinement order)
-        (define-values (bs* b* bns* bnl*)
-          (cond
-           [v
-            (define space-name (free-id-table-iterate-key spaces itr))
-            (cond
-             [best
-              (define vname (Variant-name
-                             (with-orig-stx-v
-                              (variant-vpointer (with-orig-stx-v v)))))
-              (if (list-order<
-                   (free-id-table-ref
-                    order vname
-                    (λ () (raise-syntax-error
-                           #f
-                           (format "Expected language to define refinement order for ~a"
-                                   (syntax-e vname))
-                           orig-stx)))
-                   best-space space-name free-identifier=?)
-                  (values best-space best best-new-scope best-non-linear?)
-                  (values space-name v ns nl?))]
-             [else (values space-name v ns nl?)])]
-           [else (values best-space best best-new-scope best-non-linear?)]))
-        (search (free-id-table-iterate-next spaces itr) bs* b* bns* bnl*)]
-       [else
-        (unless best
-          (raise-syntax-error #f "Variant did not match language" orig-stx))
-        (values best best-new-scope best-non-linear?)]))]))
-
-(define-syntax-class (Patterns L expected-spaces/components pattern? bound-vars pun-space?)
-  #:attributes (values non-linear? new-scope)
-  (pattern ()
-           #:fail-unless (or (null? expected-spaces/components)
-                             (not expected-spaces/components))
-           (format "Expected more components ~a" expected-spaces/components)
-           #:attr values '()
-           #:attr non-linear? #f
-           #:attr new-scope bound-vars)
-  (pattern ((~fail #:when (null? expected-spaces/components)
-                   "Expected fewer components")
-            (~var p (Pattern L (and (not pattern?) ;; FIXME: what about the pattern case?
-                                    (car expected-spaces/components))
-                             pattern? bound-vars pun-space?))
-            .
-            (~var ps (Patterns L (and (not pattern?) (cdr expected-spaces/components))
-                               pattern?
-                               (attribute p.new-scope)
-                               pun-space?)))
-           #:attr values (cons (attribute p.value) (attribute ps.values))
-           #:attr non-linear? (or (attribute p.non-linear?) (attribute ps.non-linear?))
-           #:attr new-scope (attribute ps.new-scope)))
-
-;; TODO
-(define (expectations-agree? L exp-space/component space)
-  #t)
-
-(define-splicing-syntax-class match-mode
-  #:attributes (mode)
-  (pattern #:first #:attr mode 'first)
-  (pattern #:all #:attr mode 'all)
-  (pattern #:best #:attr mode 'best)
-  (pattern (~seq) #:attr mode #f))
-
-;; Patterns and terms are similar. Rvars are allowed in terms, Name/Space in patterns.
-(define-syntax-class (Pattern L expected-space/component pattern? bound-vars pun-space?)
-  #:literal-sets (pat-ids)
-  #:attributes (value non-linear? new-scope)
-  (pattern (~and orig-stx l:literal-data)
-           #:attr value (with-orig-stx
-                         (Datum (attribute l.value))
-                         #`(Datum l.stx)
-                         #'orig-stx)
-           #:attr non-linear? #f
-           #:attr new-scope bound-vars)
-  (pattern (~and orig-stx (Space (~var S (Space-ref L))))
-           #:fail-unless (implies (attribute S.value)
-                                  (expectations-agree?
-                                   L
-                                   expected-space/component
-                                   (attribute S.value)))
-           (format "Expected space ~a but binder expects ~a"
-                   expected-space/component
-                   (attribute S.value))
-           #:attr value (with-orig-stx (Space (attribute S.value))
-                                       #`(Space #,(with-orig-stx-core (attribute S.value)))
-                                       #'orig-stx)
-           #:attr non-linear? #f
-           #:attr new-scope bound-vars)
-  (pattern (~and orig-stx
-                 (Name v:id (~var p (Pattern L expected-space/component #t bound-vars pun-space?))))
-           #:fail-unless pattern? "Terms may not use Name. Not in binding context."
-
-           #:attr value (with-orig-stx
-                         (Name #'v (attribute p.value))
-                         #`(Name 'v #,(with-orig-stx-core (attribute p.value)))
-                         #'orig-stx)
-           #:attr non-linear? (or (attribute p.non-linear?)
-                                  (free-id-table-has-key? bound-vars #'v))
-           #:attr new-scope (free-id-table-set (attribute p.new-scope) #'v #t))
-  (pattern (~and orig-stx (Rvar v:id))
-           #:fail-when pattern? "Patterns may not use Rvar. Use Name for non-linear patterns"
-           #:attr value (with-orig-stx (Rvar #'v)
-                                       #'(Rvar 'v)
-                                       #'orig-stx)
-           #:attr non-linear? #f
-           #:attr new-scope bound-vars)
-
-  (pattern (~and orig-stx (Map-with ~! (~fail #:unless pattern?
-                                              "Map-with for use only in pattern position")
-                                    (~var k (Pattern L #f #t bound-vars pun-space?))
-                                    (~var v (Pattern L #f #t (attribute k.new-scope) pun-space?))
-                                    (~var m (Pattern L #f #t (attribute v.new-scope) pun-space?))
-                                    mode:match-mode))
-           #:attr value (with-orig-stx
-                         (Map-with (attribute k.value)
-                                   (attribute v.value)
-                                   (attribute m.value)
-                                   (attribute mode.mode))
-                         (quasitemplate
-                          (Map-with #,(with-orig-stx-core (attribute m.value))
-                                    #,(with-orig-stx-core (attribute k.value))
-                                    #,(with-orig-stx-core (attribute v.value))
-                                    '#,(attribute mode.mode)))
-                         #'orig-stx)
-           #:attr non-linear? (or (attribute m.non-linear?)
-                                  (attribute k.non-linear?)
-                                  (attribute v.non-linear?))
-           #:attr new-scope (attribute m.new-scope))
-
-  (pattern (~and orig-stx (Set-with ~! (~fail #:unless pattern?
-                                              "Set-with for use only in pattern position")
-                                    (~var v (Pattern L #f #t bound-vars pun-space?))
-                                    (~var s (Pattern L #f #t (attribute v.new-scope) pun-space?))
-                                    mode:match-mode))
-           #:attr value (with-orig-stx
-                         (Set-with (attribute v.value)
-                                   (attribute s.value)
-                                   (attribute mode.mode))
-                         #`(Set-with #,(with-orig-stx-core (attribute s.value))
-                                     #,(with-orig-stx-core (attribute v.value))
-                                     '#,(attribute mode.mode))
-                         #'orig-stx)
-           #:attr non-linear? (or (attribute s.non-linear?)
-                                  (attribute v.non-linear?))
-           #:attr new-scope (attribute s.new-scope))
-
-  (pattern (~and orig-stx ((~optional variant) vname:id ps:expr ...))
-           #:do [(define es (resolve-space (Language-spaces L) expected-space/component
-                                           (dict-count (Language-spaces L))))]
-           #:fail-when (and es
-                            (not (User-Space? (with-orig-stx-v es))))
-           "Expected non-user space. Got a variant."
-           #:do [(define-values (var found-new-scope found-non-linear?)
-                   (find-suitable-variant L #'orig-stx
-                                          es
-                                          #'vname
-                                          (syntax->list #'(ps ...))
-                                          pattern?
-                                          bound-vars
-                                          pun-space?))]
-           #:attr value var
-           #:attr non-linear? found-non-linear?
-           #:attr new-scope found-new-scope)
-
-  (pattern v:id
-           #:do [(define the-space
-                   (and pun-space?
-                        ;; not shadowed by an explicit name?
-                        (not (free-id-table-has-key? bound-vars #'v))
-                        (free-id-table-ref (Language-spaces L) #'v #f)))]
-           #:fail-unless (or pattern? (free-id-table-has-key? bound-vars #'v))
-           (format "Unbound variable reference ~a" (syntax-e #'v))
-           #:attr value (if pattern?
-                            (if the-space
-                                (with-orig-stx (Space the-space)
-                                               #`(Space #,(with-orig-stx-core the-space))
-                                               #'v)
-                                (with-orig-stx (Name #'v (with-orig-stx -Anything
-                                                                        #'-Anything
-                                                                        #'v))
-                                               #`(Name 'v -Anything)
-                                               #'v))
-                            (with-orig-stx (Rvar #'v) #`(Rvar 'v) #'v))
-           #:attr non-linear? (free-id-table-has-key? bound-vars #'v)
-           #:attr new-scope (free-id-table-set bound-vars #'v #t)))
-
-;; Simple syntax for finite functions / maps
-(define-syntax-class mapsto [pattern (~or (~datum ->) (~datum →) (~datum ↦))])
-
-(define-syntax-class (Component-cls Space-names)
-  #:attributes (value)
-  #:literal-sets (component-lits)
-  #:local-conventions ([#rx".*-c$" (Component-cls Space-names)])
-  (pattern (~and orig-stx
-                 (~or
-                  (dom-c arr:mapsto rng-c)
-                  ((~or arr:mapsto Map) dom-c rng-c)))
-           #:attr value
-           (with-orig-stx (Map (attribute dom-c.value) (attribute rng-c.value))
-                          #`(Map #,(with-orig-stx-core (attribute dom-c.value))
-                                 #,(with-orig-stx-core (attribute rng-c.value)))
-                          #'orig-stx))
-  (pattern (~and orig-stx (Address-Space space:id))
-           #:attr value (with-orig-stx
-                         (Address-Space (syntax-e #'space))
-                         #'(Address-Space 'space)
-                         #'orig-stx))
-  (pattern (~and orig-stx ((~or ℘ Setof) s-c))
-           #:attr value (with-orig-stx
-                         (℘ (attribute s-c.value))
-                         #`(℘ #,(with-orig-stx-core (attribute s-c.value)))
-                         #'orig-stx))
-  (pattern (~and orig-stx (~or (~literal _) Any))
-           #:attr value (with-orig-stx -Anything #'-Anything #'orig-stx))
-  (pattern space:id
-           #:fail-unless (free-id-table-has-key? Space-names #'space)
-           (format "Unknown space ~a" (syntax-e #'space))
-           #:attr value (with-orig-stx (Space-reference #'space)
-                                       #'(Space-reference 'space)
-                                       #'space))
-  (pattern (~and orig-stx l:literal-data)
-           #:attr value (with-orig-stx
-                         (Datum (attribute l.value))
-                         #'(Datum l.stx)
-                         #'orig-stx)))
-
-(define-syntax-class (Variant-cls Space-names trust-recursion? trust-construction?)
-  #:attributes (value)
-  (pattern (~and orig-stx (constructor:id (~var cs (Component-cls Space-names)) ...))
-           #:fail-when (pat-reserved? #'constructor)
-           (format "Name reserved for the pattern language ~a" (syntax-e #'constructor))
-           #:fail-when (comp-reserved? #'constructor)
-           (format "Name reserved for the component language ~a" (syntax-e #'constructor))
-           #:attr value
-           (with-orig-stx (Variant #'constructor
-                                   (list->vector (attribute cs.value))
-                                   trust-recursion? trust-construction?)
-                          #`(Variant 'constructor 
-                                     (vector #,@(map with-orig-stx-core (attribute cs.value)))
-                                     #,trust-recursion?
-                                     #,trust-construction?)
-                          #'orig-stx)))
-
-(define-syntax-class (variant-or-component Space-names trust-recursion? trust-construction?)
-  #:attributes (value)
-  #:description "A variant declaration or a component"
-  (pattern (~var c (Component-cls Space-names))
-           #:attr value (attribute c.value))
-  (pattern (~var v (Variant-cls Space-names trust-recursion? trust-construction?))
-           #:attr value (attribute v.value)))
-
-;; Right hand side of a space definition [Space . space-inhabitants]
-(define-syntax-class (Space-inhabitants Space-names)
-  #:attributes (value)
-  (pattern (~and orig-stx
-                 (#:external-space ~! pred:expr
-                                   (~or (~optional (~seq #:cardinality card:expr))
-                                        (~optional (~and precision
-                                                         (~or #:abstract #:discrete #:concrete)))
-                                        (~optional (~seq #:equality equality:expr))) ...))
-           #:do [(define precision-classifier
-                   (if (attribute precision)
-                       (string->symbol (keyword->string (syntax-e #'precision)))
-                       'abstract))]
-           #:attr value
-           (with-orig-stx
-            (External-Space (eval-syntax #'pred)
-                            (and (attribute card) (eval-syntax #'card))
-                            precision-classifier
-                            (and (attribute equality) (eval-syntax #'equality)))
-            (quasitemplate
-             (External-Space pred (?? card #f) '#,precision-classifier (?? equality #f)))
-            #'orig-stx))
-  (pattern (~and orig-stx (#:address-space ~! tag:id))
-           #:attr value (with-orig-stx (Address-Space (syntax-e #'tag))
-                                       #'(Address-Space 'tag)
-                                       #'orig-stx))
-
-  ;; A User space is a sequence of variants
-  (pattern (~and orig-stx
-                 ((~or (~optional (~and #:trust-recursion trust-rec))
-                       (~optional (~and #:trust-construction trust-con))
-                       blah)
-                  ...)
-                 ((~or _:keyword
-                       (~var vcs (variant-or-component Space-names
-                                                        (syntax? (attribute trust-rec))
-                                                        (syntax? (attribute trust-con)))))
-                  ...))
-           #:attr value
-           (with-orig-stx (User-Space (attribute vcs.value)
-                                      (syntax? (attribute trust-rec))
-                                      (syntax? (attribute trust-con)))
-                          #`(User-Space (list #,@(map with-orig-stx-core (attribute vcs.value)))
-                                        #,(syntax? (attribute trust-rec))
-                                        #,(syntax? (attribute trust-con)))
-                          #'orig-stx)))
-
-(define-syntax-rule (pesi p)
-  (expression-store-interaction (with-orig-stx-v (attribute p))))
-
-(define-syntax-class (Expression L bound-vars Ξ pun-space?)
-  #:attributes (value)
-  #:literal-sets (expr-ids)
-  #:local-conventions ([t (Pattern L #f #f bound-vars pun-space?)]
-                       [#rx".*-e$" (Expression L bound-vars Ξ pun-space?)])
-  (pattern (~and orig-stx (Term t))
-           #:attr value (with-orig-stx
-                         (Term pure (attribute t.value))
-                         #`(Term #,pure #,(with-orig-stx-core (attribute t.value)))
-                         #'orig-stx))
-  (pattern v:literal-data
-           #:attr value (with-orig-stx
-                         (Term pure (with-orig-stx
-                                     (Datum (attribute v.value))
-                                     #'(Datum v.stx)
-                                     #'v.stx))
-                         #`(Term #,pure (Datum v.stx))
-                         #'v.stx))
-
-;;; Map expressions
-  (pattern (~and orig-stx (Map-lookup ~! m:id k-e (~optional (~seq #:default d-e))))
-           #:fail-unless (free-id-table-has-key? bound-vars #'m)
-           (format "Unbound map variable ~a" (syntax-e #'m))
-           #:do [(define default? (not (not (attribute d-e))))
-                 (define tag
-                   (add-many ;; approximate domain can lead to many lookups
-                    (fxior (pesi k-e.value)
-                           (if default?
-                               (pesi d-e.value)
-                               pure))))]
-           #:attr value (with-orig-stx
-                         (Map-lookup
-                          tag
-                          (syntax-e #'m) (attribute k-e.value)
-                          (not (not (attribute d-e)))
-                          (attribute d-e.value))
-                         (quasitemplate
-                          (Map-lookup #,tag
-                                      'm
-                                      #,(with-orig-stx-core (attribute k-e.value))
-                                      #,(not (not (attribute d-e)))
-                                      #,(and (attribute d-e)
-                                             (with-orig-stx-core (attribute d-e.value)))))
-                         #'orig-stx))
-
-  (pattern (~and orig-stx (Map-extend ~! m:id k-e v-e (~optional (~and #:trust-strong trust))))
-           #:fail-unless (free-id-table-has-key? bound-vars #'m)
-           (format "Unbound map variable ~a" (syntax-e #'m))
-           #:do [(define tag
-                   (add-many ;; approximate domain can lead to multiple extensions.
-                    (fxior (pesi k-e.value) (pesi v-e.value))))]
-           #:attr value (with-orig-stx
-                         (Map-extend tag #'m
-                                     (attribute k-e.value)
-                                     (attribute v-e.value)
-                                     (syntax? (attribute trust)))
-                         #`(Map-extend #,tag
-                                       'm
-                                       #,(with-orig-stx-core (attribute k-e.value))
-                                       #,(with-orig-stx-core (attribute v-e.value))
-                                       #,(syntax? (attribute trust)))
-                         #'orig-stx))
-
-  (pattern (~and orig-stx (Map-remove ~! m:id k-e))
-           #:fail-unless (free-id-table-has-key? bound-vars #'m)
-           (format "Unbound map variable ~a" (syntax-e #'m))
-           #:do [(define tag
-                   (fxior read/many ;; approximate domain can lead to many removals, equality ⇒ read
-                          (pesi k-e.value)))]
-           #:attr value (with-orig-stx
-                         (Map-remove tag #'m (attribute k-e.value))
-                         (quasitemplate
-                          (Map-remove #,tag
-                                      'm
-                                      #,(with-orig-stx-core (attribute k-e.value))))
-                         #'orig-stx))
-
-  (pattern (~and orig-stx (In-Dom? ~! m:id k-e))
-           #:fail-unless (free-id-table-has-key? bound-vars #'m)
-           (format "Unbound map variable ~a" (syntax-e #'m))
-           #:do [(define tag
-                   (fxior read/many ;; approximate domain can lead to ⦃b.⊤⦄, equality ⇒ read
-                          (pesi k-e.value)))]
-           #:attr value (with-orig-stx
-                         (In-Dom? tag #'m (attribute k-e.value))
-                         (quasitemplate
-                          (In-Dom? #,tag
-                                   'm
-                                   #,(with-orig-stx-core (attribute k-e.value))))
-                         #'orig-stx))
-
-  (pattern (~and orig-stx (Map-empty? ~! m:id))
-           #:fail-unless (free-id-table-has-key? bound-vars #'m)
-           (format "Unbound map variable ~a" (syntax-e #'m))
-           #:attr value (with-orig-stx
-                         (Map-empty? many #'m)
-                         (quasitemplate (Map-empty? #,many 'm))
-                         #'orig-stx))
-
-  (pattern (~and orig-stx (Empty-map ~! (~or (~optional (~and #:discrete discrete))
-                                             (~optional (~and #:concrete concrete))
-                                             ;; for symmetry.
-                                             (~optional #:abstract)
-                                             (~optional (~seq #:abstraction-of abs-of-e)))))
-           #:do [(define-values (fn stx)
-                   (cond [(syntax? (attribute discrete))
-                          (values discrete-ffun #'discrete-ffun)]
-                         [(syntax? (attribute concrete))
-                          (values values #'values)]
-                         [(attribute abs-of-e)
-                          (define v (attribute abs-of-e.value))
-                          (values v (with-orig-stx-core v))]
-                         [else (values abstract-ffun #'abstract-ffun)]))]
-           #:attr value (with-orig-stx (Empty-map pure fn)
-                                       #`(Empty-map #,pure #,stx)
-                                       #'orig-stx))
-
-;;; Generic expressions
-
-  (pattern (~and orig-stx (If ~! g-e t-e e-e))
-           #:do [(define tag (fxior (pesi g-e.value)
-                                    (fxior (pesi t-e.value)
-                                           (pesi e-e.value))))]
-           #:attr value (with-orig-stx
-                         (If tag (attribute g-e.value) (attribute t-e.value) (attribute e-e.value))
-                         #`(If #,tag
-                               #,(with-orig-stx-core (attribute g-e.value))
-                               #,(with-orig-stx-core (attribute t-e.value))
-                               #,(with-orig-stx-core (attribute e-e.value)))
-                         #'orig-stx))
-  (pattern (~and orig-stx (Let ~! (~var bscs (Bindings L bound-vars Ξ pun-space?))
-                               (~var body (Expression L (attribute bscs.new-scope) Ξ pun-space?))))
-           #:do [(define tag (fxior (attribute bscs.interaction)
-                                    (pesi body.value)))
-                 (define bscs-v
-                   (with-orig-stx
-                    (BSCS (attribute bscs.interaction) (attribute bscs.value))
-                    #`(BSCS #,(attribute bscs.interaction)
-                            (list . #,(map with-orig-stx-core (attribute bscs.value))))
-                    (map with-orig-stx-surface-stx (attribute bscs.value))))]
-           #:attr value
-           (with-orig-stx (Let tag bscs-v (attribute body.value))
-                          #`(Let #,tag
-                                 #,(with-orig-stx-core bscs-v)
-                                 #,(with-orig-stx-core (attribute body.value)))
-                          #'orig-stx))
-  (pattern (~and orig-stx
-                 (Match ~! d-e
-                        (~and rule-stxs
-                              [(~var p (Pattern L #f #t bound-vars pun-space?))
-                               rhs-raw .
-                               (~var bscs (Bindings L (attribute p.new-scope) Ξ pun-space?))])
-                        ...))
-           #:do [(define-values (rev-rhs si)
-                   (for/fold ([rev-rhs '()] [si (pesi d-e.value)])
-                       ([rhs (in-list (attribute rhs-raw))]
-                        [bscsns (in-list (attribute bscs.new-scope))]
-                        [bscssi (in-list (attribute bscs.interaction))])
-                     (syntax-parse rhs
-                       [(~var rhs (Pattern L #f #f bscsns pun-space?))
-                        (values (cons (attribute rhs.value) rev-rhs)
-                                (fxior si bscssi))])))
-                 (define rhss (reverse rev-rhs))
-                 (define rules
-                   (for/list ([rule-stx (in-list (attribute rule-stxs))]
-                              [pat (in-list (attribute p.value))]
-                              [rhs (in-list rhss)]
-                              [bscsv (in-list (attribute bscs.value))]
-                              [bscssi (in-list (attribute bscs.interaction))])
-                     (with-orig-stx
-                      (Rule #f pat rhs (BSCS bscssi bscsv))
-                      #`(Rule #f
-                              #,(with-orig-stx-core pat)
-                              #,(with-orig-stx-core rhs)
-                              (BSCS
-                               #,bscssi
-                               (list . #,(map with-orig-stx-core bscsv))))
-                      rule-stx)))]
-           #:attr value (with-orig-stx (Match si (attribute d-e.value) rules)
-                                       #`(Match #,si
-                                                #,(with-orig-stx-core (attribute d-e.value))
-                                                (list . #,(map with-orig-stx-core rules)))
-                                       #'orig-stx))
-  (pattern (~and orig-stx (Equal ~! l-e r-e))
-           #:do [(define tag ;; can fail and can be approximate.
-                   (fxior read/many
-                          (fxior (pesi l-e.value) (pesi r-e.value))))]
-           #:attr value
-           (with-orig-stx
-            (Equal tag (attribute l-e.value) (attribute r-e.value))
-            #`(Equal #,tag
-                     #,(with-orig-stx-core (attribute l-e.value))
-                     #,(with-orig-stx-core (attribute r-e.value)))
-            #'orig-stx))
-  (pattern (~and orig-stx (Choose ~! (~or (~optional (~and #:label ℓ:id)) (~once s-e)) ...))
-           #:do [(define tag (add-many (pesi s-e.value)))]
-           #:attr value
-           (with-orig-stx
-            (Choose tag (if (attribute ℓ) (syntax-e #'ℓ) (gensym)) (attribute s-e.value))
-            (quasitemplate
-             (Choose #,tag (?? 'ℓ (gensym)) #,(with-orig-stx-core (attribute s-e.value))))
-            #'orig-stx))
-
-;;; Set expressions
-
-  (pattern (~and orig-stx (Empty-set ~! (~or (~optional (~and #:discrete discrete))
-                                             (~optional (~and #:concrete concrete))
-                                             ;; for symmetry.
-                                             (~optional #:abstract)
-                                             (~optional (~seq #:abstraction-of abs-of-e)))))
-           #:do [(define-values (fn stx)
-                   (cond [(syntax? (attribute discrete))
-                          (values discrete-set #'discrete-set)]
-                         [(syntax? (attribute concrete))
-                          (values values #'values)]
-                         [(attribute abs-of-e)
-                          (define v (attribute abs-of-e.value))
-                          (values v (with-orig-stx-core v))]
-                         [else (values abstract-set #'abstract-set)]))]
-           #:attr value (with-orig-stx (Empty-set pure fn)
-                                       #`(Empty-set #,pure #,stx)
-                                       #'orig-stx))
-
-  (pattern (~and orig-stx ((~and head
-                                 (~or (~and Set-Union
-                                            (~bind [constr Set-Union]))
-                                      (~and Set-Add*
-                                            (~bind [constr Set-Add*]))
-                                      (~and Set-Remove*
-                                            (~bind [constr Set-Remove*] [tagx many]))
-                                      (~and Set-Subtract
-                                            (~bind [constr Set-Subtract] [tagx many]))
-                                      (~and Set-Intersect
-                                            (~bind [constr Set-Intersect] [tagx many]))))
-                           ~! s-e v-e ...))
-           #:do [(define tag
-                   (let get-tag ([tag (pesi s-e.value)]
-                                 [exprs (attribute v-e.value)])
-                     (match exprs
-                       [(cons e exprs)
-                        (get-tag (fxior tag (expression-store-interaction (with-orig-stx-v e)))
-                                 exprs)]
-                       ['()
-                        (if (attribute tagx)
-                            (fxior (attribute tagx) tag)
-                            tag)])))]
-           #:attr value
-           (with-orig-stx
-            ((attribute constr) tag (attribute s-e.value) (attribute v-e.value))
-            #`(head #,tag
-                    #,(with-orig-stx-core (attribute s-e.value))
-                    (list #,@(map with-orig-stx-core (attribute v-e.value))))
-            #'orig-stx))
-  (pattern (~and orig-stx (In-Set? ~! s-e v-e))
-           #:do [(define tag
-                   (fxior ;; can be approximate, and may indirect through store to check equality
-                    read/many
-                    (fxior (pesi s-e.value) (pesi v-e.value))))]
-           #:attr value
-           (with-orig-stx
-            (In-Set? tag (attribute s-e.value) (attribute v-e.value))
-            #`(In-Set? #,tag
-                       #,(with-orig-stx-core (attribute s-e.value))
-                       #,(with-orig-stx-core (attribute v-e.value)))
-            #'orig-stx))
-  (pattern (~and orig-stx (Set-empty? ~! s-e))
-           #:do [(define tag
-                   (add-many ;; can be approximate, and may indirect through store to check equality
-                    (pesi s-e.value)))]
-           #:attr value
-           (with-orig-stx
-            (Set-empty? tag (attribute s-e.value))
-            #`(Set-empty? #,tag #,(with-orig-stx-core (attribute s-e.value)))
-            #'orig-stx))
-
-;;; Store expressions
-  (pattern (~and orig-stx (Store-lookup ~! k-e))
-           #:do [(define tag (add-reads (pesi k-e.value)))]
-           #:attr value (with-orig-stx
-                         (Store-lookup tag (attribute k-e.value))
-                         #`(Store-lookup #,tag #,(with-orig-stx-core (attribute k-e.value)))
-                         #'orig-stx))
-  (pattern (~and orig-stx
-                 ((~and alloc-stx
-                        (~or (~and SAlloc (~bind [allocer SAlloc]))
-                             (~and MAlloc (~bind [allocer MAlloc])))) ~!
-                             space:id))
-           #:attr value
-           (with-orig-stx
-            ((attribute allocer) allocs (syntax-e #'space))
-            #`(alloc-stx #,allocs 'space)
-            #'orig-stx))
-  (pattern (~and orig-stx
-                 ((~and alloc-stx
-                        (~or (~and QSAlloc (~bind [allocer QSAlloc]))
-                             (~and QMAlloc (~bind [allocer QMAlloc])))) space:id hint:expr))
-           #:attr value
-           (with-orig-stx
-            ((attribute allocer) allocs (syntax-e #'space) (eval-syntax #'hint))
-            #`(alloc-stx #,allocs 'space hint)
-            #'orig-stx))
-  (pattern (~and orig-stx Unsafe-store-space-ref)
-           #:attr value (with-orig-stx (Unsafe-store-space-ref pure)
-                                       #'Unsafe-store-space-ref
-                                       #'orig-stx))
-  (pattern (~and orig-stx (Unsafe-store-ref space:id))
-           #:attr value (with-orig-stx
-                         (Unsafe-store-ref pure (syntax-e #'space))
-                         #`(Unsafe-store-ref #,pure 'space)
-                         #'orig-stx))
-
-  (pattern (~and orig-stx
-                 (~or (~and ??? (~bind [label-stx #'"TODO"]))
-                      (??? label-stx:expr)))
-           #:attr value (with-orig-stx
-                         (??? pure (eval-syntax #'label-stx))
-                         #`(??? #,pure label-stx)
-                         #'orig-stx))
-
-  (pattern (~and orig-stx (mf:id t))
-           #:fail-unless (free-id-table-has-key? Ξ #'mf)
-           (format "Meta-function not in scope ~a" (syntax-e #'mf))
-           #:attr value (with-orig-stx
-                         (Meta-function-call read/write/alloc/many #'mf (attribute t.value))
-                         #`(Meta-function-call #,read/write/alloc/many
-                                               'mf #,(with-orig-stx-core (attribute t.value)))
-                         #'orig-stx))
-
-  ;; Common case is just referencing pattern variables, so make the term wrapping automatic.
-  (pattern v:id
-           #:fail-unless (free-id-table-has-key? bound-vars #'v)
-           (format "Variable not in scope ~a" (syntax-e #'v))
-           #:attr value (with-orig-stx (Term pure (with-orig-stx
-                                                   (Rvar #'v)
-                                                   #`(Rvar 'v)
-                                                   #'v))
-                                       #`(Term #,pure (Rvar 'v))
-                                       #'v)))
-
-(define-syntax-class (BSC L bound-vars Ξ pun-space?)
-  #:attributes (value new-scope interaction)
-  #:literals (where when update)
-  #:description "A binding/side-condition/store-update"
-  #:commit
-  #:local-conventions ([#rx".*-e$" (Expression L bound-vars Ξ pun-space?)])
-  (pattern (~and orig-stx (where ~!
-                                 (~var p (Pattern L #f #t bound-vars pun-space?))
-                                 let-e))
-           #:attr value
-           (with-orig-stx (Binding (attribute p.value) (attribute let-e.value))
-                          #`(Binding #,(with-orig-stx-core (attribute p.value))
-                                     #,(with-orig-stx-core (attribute let-e.value)))
-                          #'orig-stx)
-           #:attr new-scope (attribute p.new-scope)
-           #:attr interaction (let ([si (pesi let-e.value)])
-                                (if (attribute p.non-linear?)
-                                    ;; Can possibly fail, so that makes set representation necessary.
-                                    (fxior si read/many)
-                                    si)))
-  (pattern (~and orig-stx (when ~! sc-e))
-           #:attr value (with-orig-stx (When (attribute sc-e.value))
-                                       #`(When #,(with-orig-stx-core (attribute sc-e.value)))
-                                       #'orig-stx)
-           #:attr new-scope bound-vars
-           #:attr interaction (add-many (pesi sc-e.value)))
-  (pattern (~and orig-stx (update ~! k-e v-e (~optional (~and #:trust-strong trust-strong))))
-           #:attr value
-           (with-orig-stx
-            (Store-extend (attribute k-e.value)
-                          (attribute v-e.value)
-                          (syntax? (attribute trust-strong)))
-            #`(Store-extend
-               #,(with-orig-stx-core (attribute k-e.value))
-               #,(with-orig-stx-core (attribute v-e.value))
-               #,(syntax? (attribute trust-strong)))
-            #'orig-stx)
-           #:attr new-scope bound-vars
-           #:attr interaction
-           (add-writes (fxior (pesi k-e.value) (pesi v-e.value)))))
-
-(define-syntax-class (Bindings L bound-vars Ξ pun-space?)
-  #:attributes (new-scope value interaction)
-  #:commit
-  (pattern (~and orig-stx ()) #:attr new-scope bound-vars
-           #:attr value '()
-           #:attr interaction pure)
-  (pattern (~and orig-stx
-                 ((~var bsc (BSC L bound-vars Ξ pun-space?)) .
-                  (~var bscs (Bindings L (attribute bsc.new-scope) Ξ pun-space?))))
-           #:attr value (cons (attribute bsc.value) (attribute bscs.value))
-           #:attr new-scope (attribute bscs.new-scope)
-           #:attr interaction (fxior (attribute bsc.interaction)
-                                     (attribute bscs.interaction))))
-
 (define-syntax-class Lang
   #:attributes (langv id)
   (pattern L:id
@@ -1100,22 +261,65 @@ TODO?: Add binding arrows using DrRacket's API
            #:attr id #'L
            #:attr langv v))
 
+(define-splicing-syntax-class (Options-cls lang-ops)
+  #:attributes (value)
+  (pattern (~seq
+            (~or (~optional (~or (~and #:pun-space-names pun-space)
+                                 (~and #:no-pun-space-names no-pun-space)))
+                 (~optional (~or (~and #:report-type-errors type-errors)
+                                 (~and #:silence-type-errors no-type-errors)))
+                 (~optional (~or (~and #:report-missing-expect missing)
+                                 (~and #:silence-missing-expect no-missing)))
+                 (~optional x:Externalize)
+                 (~optional (~seq #:default-behaviors [behaviors:Behaviors]))) ...)
+           #:attr value
+           (Options (cond
+                     [(syntax? (attribute pun-space)) #t]
+                     [(syntax? (attribute no-pun-space)) #f]
+                     [lang-ops (Options-pun-space? lang-ops)]
+                     [else core-pun-spaces-default])
+                    (cond
+                     [(attribute x) (attribute x.externalize?)]
+                     [lang-ops (Options-externalize? lang-ops)]
+                     [else core-externalize-default])
+                    (cond
+                     [(syntax? (attribute type-errors)) #t]
+                     [(syntax? (attribute no-type-errors)) #f]
+                     [lang-ops (Options-raise-type-errors? lang-ops)]
+                     [else core-raise-type-errors-default])
+                    (cond
+                     [(syntax? (attribute missing)) #t]
+                     [(syntax? (attribute no-missing)) #f]
+                     [lang-ops (Options-error-on-missing-expect? lang-ops)]
+                     [else core-error-on-missing-expect-default])
+                    (or (attribute behaviors.match-behavior)
+                        (and lang-ops (Options-match-default lang-ops))
+                        core-match-default)
+                    (or (attribute behaviors.equal-behavior)
+                        (and lang-ops (Options-equal-default lang-ops))
+                        core-equal-default))))
+
 (define (get-variant-in-space spaces c s)
-  (match (resolve-space spaces (free-id-table-ref spaces s) (dict-count spaces))
-    [(with-orig-stx (User-Space vars _ _) _ _)
-     (for/or ([v-or-c (in-list vars)])
-       (match (with-orig-stx-v v-or-c)
-         [(Variant name _ _ _)
-          (and (free-identifier=? c name)
-               v-or-c)]
-         [(Space-reference s) (get-variant-in-space spaces c s)]
+  (unless (identifier? s)
+    (error 'get-variant-in-space "Bad space name (~a) given ~a and ~a" s spaces c))
+  (match (resolve-space spaces (free-id-table-ref spaces s))
+    [(with-orig-stx (User-Space comp _ _) _ _)
+     (let search ([comp comp])
+       (match (with-orig-stx-v comp)
+         [(? Variant? v) (and (free-identifier=? c (Variant-name v))
+                            comp)]
+         [(∪ _ comps) (ormap search comps)]
+         [(? Space-reference? sr)
+          (get-variant-in-space spaces c (Space-reference-name sr))]
          [_ #f]))]
     [_ #f])))
 
 (define-syntax (define-language stx)
   (syntax-parse stx
-    [(_ name:id ~! (~or [space-name:id ss ...]
-                        (~seq #:refinement ([constructor:id (refining-spaces:id ...)] ...))) ...)
+    [(_ name:id ~!
+        (~var op (Options-cls #f))
+        (~or [space-name:id ss ...]
+             (~seq #:refinement ([constructor:id (refining-spaces:id ...)] ...))) ...)
      #:do [;; refinements are broken into chunks, so glom together before checking.
            (define constructor* (append* (attribute constructor)))
            (define refining-spaces* (append* (attribute refining-spaces)))
@@ -1124,10 +328,7 @@ TODO?: Add binding arrows using DrRacket's API
      #:fail-when duplicate
      (format "Cannot re-specify refinement order of ~a" duplicate)
 
-     #:do [(define Space-names
-             (for/fold ([t (make-immutable-free-id-table)])
-                 ([sn (in-list (attribute space-name))])
-               (free-id-table-set t sn #t)))
+     #:do [(define Space-names (get-space-names (attribute space-name)))
            (define not-a-space
              (for*/list ([rss (in-list refining-spaces*)]
                          [rs (in-list rss)]
@@ -1137,7 +338,7 @@ TODO?: Add binding arrows using DrRacket's API
      (format "Names given in refinement ordering not space names ~a" not-a-space)
 
      (syntax-parse #'((ss ...) ...)
-        [((~var inh (Space-inhabitants Space-names)) ...)
+        [((~var inh (Space-inhabitants Space-names (attribute op.value))) ...)
          #:do [(define inh-table
                  (for/fold ([t (make-immutable-free-id-table)])
                      ([sn (in-list (attribute space-name))]
@@ -1173,40 +374,31 @@ TODO?: Add binding arrows using DrRacket's API
                              ([sn (in-list (attribute space-name))]
                               [space (in-list (attribute inh.value))])
                            #`(free-id-table-set #,tstx #'#,sn #,(quine-space space)))
-                       #,refinement-order))
+                       #,refinement-order
+                       #,(quine-Options (attribute op.value))))
             (free-id-table-set! language-meta-functions #'name (make-free-id-table)))])]))
-
-(define-syntax (reify-language stx)
-  (syntax-parse stx
-    [(_ L:Lang)
-     (match-define (Language spaces refinement-order) (attribute L.langv))
-     #`(Language (hash #,@(reverse
-                           (for/fold ([kvs '()]) ([(name space) (in-free-id-table spaces)])
-                             (list* (with-orig-stx-core space) #`(quote #,name) kvs))))
-                 #,refinement-order)]))
-
-(define-syntax (reify-metafunctions-of stx)
-  (syntax-parse stx
-    [(_ L:Lang)
-     (define rev-vks
-       (for/fold ([acc '()])
-           ([(name mf) (in-free-id-table (free-id-table-ref language-meta-functions #'L.id))])
-         (list* (with-orig-stx-core mf) #`'#,name acc)))
-     #`(hash #,@(reverse rev-vks))]))
 
 (define-syntax (reduction-relation stx)
   (syntax-parse stx
     #:literals (-->)
     [(_ lang:Lang ~!
-        (~optional (~and #:pun-space-names pun-space))
         (~do (define Ξ (free-id-table-ref language-meta-functions #'lang.id))
-             (define langv (attribute lang.langv))
-             (define pun-space? (syntax? (attribute pun-space))))
-        [--> (~optional (~seq #:name name))
-             (~var lhs (Pattern langv #f #t (make-immutable-free-id-table) pun-space?)) ~!
-             rhs-raw ~!
-             .
-             (~var bscs (Bindings langv (attribute lhs.new-scope) Ξ pun-space?))]
+             (define langv (attribute lang.langv)))
+        (~var op (Options-cls (Language-options langv)))
+        (~optional (~seq #:state-space
+                         (~var ss (Component-cls
+                                   (get-space-names langv)
+                                   ;; FIXME?: probably shouldn't dismiss recursive states
+                                   #f #f
+                                   (Language-options langv)))))
+        (~and
+         rule-stx
+         [--> (~optional (~seq #:name name))
+              (~var lhs (Pattern langv #f #t #t (make-immutable-free-id-table)
+                                 (attribute op.value))) ~!
+              rhs-raw ~!
+              .
+              (~var bscs (Bindings langv #t (attribute lhs.new-scope) Ξ (attribute op.value)))])
         ...)
      ;; Parse right-hand-sides after the fact since the binding-side-conditions extend the scope
      ;; positionally after the RHS.
@@ -1214,43 +406,92 @@ TODO?: Add binding arrows using DrRacket's API
        (for/list ([rhs (in-list (attribute rhs-raw))]
                   [bscsns (in-list (attribute bscs.new-scope))])
          (syntax-parse rhs
-           [(~var rhs (Pattern langv #f #f bscsns pun-space?))
+           [(~var rhs (Pattern langv #f #f #t bscsns (attribute op.value)))
             (attribute rhs.value)])))
-     #`(list .
-             #,(for/list ([l (in-list (attribute lhs.value))]
-                          [r (in-list rhss)]
-                          [bsc (in-list (attribute bscs.value))]
-                          [n (in-list (attribute name))]
-                          [si (in-list (attribute bscs.interaction))])
-                 #`(Rule #,(and n #`'#,n)
-                         #,(with-orig-stx-core l)
-                         #,(with-orig-stx-core r)
-                         (BSCS #,si (list . #,(map with-orig-stx-core bsc))))))]))
+     
+     (define ssv (attribute ss.value))
+     (define rule-woss
+       (for/list ([rstx (in-list (attribute rule-stx))]
+                  [l (in-list (attribute lhs.value))]
+                  [r (in-list rhss)]
+                  [bsc-stx (in-list (attribute bscs))]
+                  [bsc (in-list (attribute bscs.value))]
+                  [n (in-list (attribute name))]
+                  [si (in-list (attribute bscs.interaction))])
+         (define BSCS-wos
+           (with-orig-stx
+            (BSCS si bsc)
+            #`(BSCS #,si (list . #,(map with-orig-stx-core bsc)))
+            bsc-stx))
+         (with-orig-stx
+          (Rule n l r BSCS-wos ssv ssv)
+          #`(Rule #,(and n #`'#,n)
+                  #,(with-orig-stx-core l)
+                  #,(with-orig-stx-core r)
+                  #,(with-orig-stx-core BSCS-wos)
+                  #,(and ssv (with-orig-stx-core ssv))
+                  #,(and ssv (with-orig-stx-core ssv)))
+          rstx)))
+     (define wos
+       (with-orig-stx
+        (Reduction-Relation rule-woss ssv)
+        #`(Reduction-Relation
+           (list . #,(map with-orig-stx-core rule-woss))
+           #,(and ssv (with-orig-stx-core ssv)))
+        stx))
+     (define wos*
+       (if (Options-raise-type-errors? (attribute op.value))
+           (typecheck-RR langv Ξ wos)
+           wos))
+     (with-orig-stx-core wos*)]))
 
 (begin-for-syntax
  (define (name-is-constructor? L id)
    (for*/or ([space (in-dict-values (Language-spaces L))]
              [spacev (in-value (with-orig-stx-v space))]
-             #:when (User-Space? spacev)
-             [v-or-c (in-list (User-Space-variants spacev))]
-             #:when (Variant? v-or-c))
-     (free-identifier=? (Variant-name v-or-c) id)))
+             #:when (User-Space? spacev))
+     (let search ([c (User-Space-component spacev)])
+       (match c
+         [(∪ _ cs) (ormap search cs)]
+         [(? Variant?) (free-identifier=? (Variant-name c) id)]
+         [_ #f]))))
 
- (define (parse-meta-function stx Ξ L pun-space?)
+ (define-syntax-class funto [pattern (~or (~datum ->) (~datum →))])
+
+ (define-splicing-syntax-class (MF-type space-names options)
+   #:attributes (dom rng)
+   (pattern (~seq (~datum :)
+                  (~or (~seq (~var dom-c (Component-cls space-names #f #f options))
+                             _:funto
+                             (~var rng-c (Component-cls space-names #f #f options)))
+                       (_:funto
+                        (~var dom-c (Component-cls space-names #f #f options))
+                        (~var rng-c (Component-cls space-names #f #f options)))))
+            #:attr dom (attribute dom-c.value)
+            #:attr rng (attribute rng-c.value)))
+
+ (define (parse-meta-function stx Ξ L options)
    (syntax-parse stx
      [(mf-name:id
        (~optional lang:Lang)
        (~do (define langv (or L (attribute lang.langv))))
        (~fail #:unless (Language? langv) "Language not supplied.")
+       (~optional (~var mf-type (MF-type (get-space-names langv)
+                                         (Language-options langv))))
        (~or (~optional (~seq #:concrete conc:expr))
             (~optional (~seq #:abstract abs:expr (~or (~optional (~and #:reads tr-reads))
                                                       (~optional (~and #:writes tr-writes))
                                                       (~optional (~and #:allocs tr-allocs))
                                                       (~optional (~and #:many tr-many))) ...))) ...
-       [(~var lhs (Pattern langv #f #t (make-immutable-free-id-table) pun-space?))
+       (~do (define-values (domv rngv)
+              (if (attribute mf-type)
+                  (values (with-orig-stx-v (attribute mf-type.dom))
+                          (with-orig-stx-v (attribute mf-type.rng)))
+                  (values #f #f))))
+       [(~var lhs (Pattern langv domv #t #t (make-immutable-free-id-table) options))
         rhs-raw
         .
-        (~var bscs (Bindings langv (attribute lhs.new-scope) Ξ pun-space?))]
+        (~var bscs (Bindings langv #t (attribute lhs.new-scope) Ξ options))]
        ...)
       ;; At this point, components won't show up, so we can overwrite those.
       #:fail-when (pat-reserved? #'mf-name)
@@ -1263,7 +504,7 @@ TODO?: Add binding arrows using DrRacket's API
         (for/list ([rhs-stx (in-list (syntax->list #'(rhs-raw ...)))]
                    [ns (in-list (attribute bscs.new-scope))])
           (syntax-parse rhs-stx
-            [(~var rhs (Pattern langv #f #f ns pun-space?)) (attribute rhs.value)])))
+            [(~var rhs (Pattern langv rngv #f #t ns options)) (attribute rhs.value)])))
 
       (define-values (rev-rules si)
         (for/fold ([rev-rules '()] [overall-si pure])
@@ -1275,9 +516,11 @@ TODO?: Add binding arrows using DrRacket's API
                                 #,(quine-pattern l)
                                 #,(quine-pattern r)
                                 (BSCS #,si
-                                 (list . #,(map quine-bsc bsc))))
+                                      (list . #,(map quine-bsc bsc)))
+                                no-comp-yet no-comp-yet)
                         rev-rules)
                   (fxior si overall-si))))
+      (define rules (reverse rev-rules))
       (define trusted-si
         (if (attribute abs)
             (for/fold ([si pure])
@@ -1289,8 +532,34 @@ TODO?: Add binding arrows using DrRacket's API
                  #:when syn)
               (fxior si quality))
             si))
-      (quasitemplate
+      (with-orig-stx
        (with-orig-stx
+        (Meta-function #'mf-name
+                       rules
+                       ;; collect up the store interactions given by the syntax.
+                       trusted-si
+                       (and (attribute conc) (eval-syntax #'conc))
+                       (and (attribute abs) (eval-syntax #'abs)))
+        (quasitemplate
+         (Meta-function 'mf-name
+                        (list .
+                              #,(for/list ([l (in-list (attribute lhs.value))]
+                                           [r (in-list rhss)]
+                                           [bsc (in-list (attribute bscs.value))]
+                                           [si (in-list (attribute bscs.interaction))])
+                                  #`(Rule #f
+                                          #,(with-orig-stx-core l)
+                                          #,(with-orig-stx-core r)
+                                          (BSCS
+                                           #,si
+                                           (list . #,(map with-orig-stx-core bsc)))
+                                          no-comp-yet no-comp-yet)))
+                        #,trusted-si
+                        (?? conc #f)
+                        (?? abs #f)))
+        stx)
+       (quasitemplate
+        (with-orig-stx
          (Meta-function #'mf-name
                         (list . #,(reverse rev-rules))
                         ;; collect up the store interactions given by the syntax.
@@ -1309,158 +578,67 @@ TODO?: Add binding arrows using DrRacket's API
                                            #,(with-orig-stx-core r)
                                            (BSCS
                                             #,si
-                                            (list . #,(map with-orig-stx-core bsc))))))
+                                            (list . #,(map with-orig-stx-core bsc)))
+                                           no-comp-yet no-comp-yet)))
                          #,trusted-si
                          (?? conc #f)
                          (?? abs #f)))
-         #'#,stx))])))
+         #'#,stx))
+       stx)]))
+ )
 
 ;; Set up the environment that says which meta-functions are in scope.
 (define-syntax (define-metafunctions stx)
   (syntax-parse stx
-    [(_ L:Lang (~optional (~and #:pun-space-names pun-space))
-        (~and mfs (mf-name:id ~! . rest)) ...)
-     (define Ξ (make-free-id-table))
+    [(_ L:Lang
+        (~var op (Options-cls (Language-options (attribute L.langv))))
+        (~and mfs (mf-name:id ~!
+                              (~optional (~var mf-type
+                                               (MF-type
+                                                (get-space-names (attribute L.langv))
+                                                (Language-options (attribute L.langv))))) . rest))
+        ...)
      (define other-mfs (free-id-table-ref language-meta-functions #'L))
-     (for ([name (in-list (append (attribute mf-name) (dict-keys other-mfs)))])
-       (free-id-table-set! Ξ name #t))
+     (define Ξ (make-free-id-table))
+     ;; XXX: would really rather use dict-copy, but it's not implemented.
+     (for ([(k v) (in-dict other-mfs)])
+       (free-id-table-set! Ξ k v))
+     (for ([name (in-list (attribute mf-name))]
+           [mfd (in-list (attribute mf-type.dom))]
+           [mfr (in-list (attribute mf-type.rng))])
+       (free-id-table-set! Ξ name (and mfd mfr (cons mfd mfr))))
+     (define new-mfs
+       (for/list ([mf (in-list (attribute mfs))]
+                  [mfd (in-list (attribute mf-type.dom))]
+                  [mfr (in-list (attribute mf-type.rng))])
+         (define mfwos
+           (parse-meta-function mf Ξ (attribute L.langv)
+                                (attribute op.value)))
+         (if (Options-raise-type-errors? (attribute op.value))
+             (typecheck-MF (attribute L.langv) Ξ mfwos mfd mfr)
+             mfwos)))
      #`(begin-for-syntax
         (let ([other-mfs (free-id-table-ref language-meta-functions #'L)])
           #,@(for/list ([name (in-list (attribute mf-name))]
-                        [mf (in-list (attribute mfs))])
+                        [mfwos (in-list new-mfs)])
                #`(free-id-table-set!
-                  other-mfs #'#,name
-                  #,(parse-meta-function mf Ξ (attribute L.langv)
-                                         (syntax? (attribute pun-space)))))))]))
+                  other-mfs #'#,name #,(with-orig-stx-core mfwos)))))]))
 
-(define (unparse-rule L rule)
-  (match rule
-   [(Rule name lhs rhs bscs)
-    `(Rule ,name
-           ,(unparse-pattern L lhs)
-           ,(unparse-pattern L rhs)
-           ,(unparse-bscs L bscs))]))
+(define-syntax (reify-language stx)
+  (syntax-parse stx
+    [(_ L:Lang)
+     (match-define (Language spaces refinement-order options) (attribute L.langv))
+     #`(Language (hash #,@(reverse
+                           (for/fold ([kvs '()]) ([(name space) (in-dict spaces)])
+                             (list* (with-orig-stx-core space) #`(quote #,name) kvs))))
+                 #,refinement-order
+                 #,(quine-Options options))]))
 
-(define (unparse-semantics L R) (for/list ([rule (in-list R)]) (unparse-rule L rule)))
-(define (unparse-language L)
-  (match-define (Language spaces refinement-order) L)
-  `(Language ,(for/list ([(name space) (in-hash spaces)])
-                (list name (unparse-lang-space space)))))
-
-(define (unparse-pattern L p)
-  (define (recur p)
-    (match p
-      [(Name x pat)
-       `(Name ,x ,(recur pat))]
-      [(Space S) (unparse-space L S)]
-      [(Rvar x) x]
-      [(Set-with vpat spat mode)
-       `(Set-with ,(recur vpat) ,(recur spat) ,mode)]
-      [(Map-with kpat vpat mpat mode)
-       `(Map-with ,(recur kpat) ,(recur vpat) ,(recur mpat) ,mode)]
-      [(variant (Variant name _ _ _) pats)
-       (cons name (for/list ([p (in-vector pats)]) (recur p)))]
-      [(== -Anything eq?)
-       '_]))
-  (recur p))
-
-(define (unparse-bsc L bsc)
-  (match bsc
-    [(When e) `(when ,(unparse-expression L e))]
-    [(Binding pat e) `(where ,(unparse-pattern L pat) ,(unparse-expression L e))]
-    [(Store-extend ae ve strong?) `(update ,(unparse-expression L ae) ,(unparse-expression L ve) ,strong?)]))
-
-(define (unparse-bscs L bscs)
-  (match-define (BSCS _ bindings) bscs)
-  (for/list ([bsc (in-list bindings)]) (unparse-bsc L bsc)))
-
-(define (unparse-space L S)
-  (match S
-    [(Space-reference name) name]
-    [(Address-Space space) `(Address-Space ,space)]
-    [_ (or (for/or ([(name S*) (in-hash (Language-spaces L))]
-                    #:when (equal? S S*))
-              name)
-            `(could-not-unparse ,S))]))
-
-(define (unparse-lang-space S)
-  (match S
-    [(Space-reference name) name]
-    [(Address-Space space) `(Address-Space ,space)]
-    [(User-Space v-or-cs _ _)
-     `(User-Space . ,(for/list ([v-or-c (in-list v-or-cs)])
-                       (if (Variant? v-or-c)
-                           (unparse-Variant v-or-c)
-                           (unparse-Component v-or-c))))]
-    [(External-Space pred card prec ≡)
-     `(External-Space ,(object-name pred) ,(and card (object-name card)) ,prec ,(and ≡ (object-name ≡)))]))
-
-(define (unparse-Variant var)
-  (match var
-    [(Variant name comps _ _)
-     (cons name (for/list ([comp (in-vector comps)])
-                  (unparse-Component comp)))]))
-(define (unparse-Component comp)
-  (match comp
-    [(Space-reference name) name]
-    [(Map dom rng) `(Map ,(unparse-Component dom) ,(unparse-Component rng))]
-    [(QMap dom dprec rng) `(QMap ,(unparse-Component dom) ,dprec ,(unparse-Component rng))]
-    [(℘ comp) `(℘ ,(unparse-Component comp))]
-    [(? Anything?) '_]
-    [(Address-Space space) `(Address-Space ,space)]
-    [(Datum atom) atom]))
-
-(define (unparse-expression L e)
-  (define (recur e)
-    (match e
-      [(Let _ bscs body) `(Let ,(unparse-bscs L bscs) ,(recur body))]
-      [(Match _ d rules) `(Match ,(recur d) .
-                                 ,(for/list ([rule (in-list rules)])
-                                    (match (unparse-rule L rules)
-                                      [`(Rule ,_ ,lhs ,rhs ,bscs)
-                                       (list* lhs rhs bscs)])))]
-      [(Term _ pat) `(Term ,(unparse-pattern L pat))]
-      [(Store-lookup _ k) `(Store-lookup ,(recur k))]
-      [(If _ g t e) `(If ,(recur g) ,(recur t) ,(recur e))]
-      [(Equal _ l r) `(Equal ,(recur l) ,(recur r))]
-      [(Choose _ ℓ e) `(Choose ,ℓ ,(recur e))]
-      [(Meta-function-call _ name pat) (cons name (unparse-pattern L pat))]
-      [(SAlloc _ space) `(SAlloc ,space)]
-      [(MAlloc _ space) `(MAlloc ,space)]
-      [(QSAlloc _ space hint) `(SAlloc ,space ,hint)]
-      [(QMAlloc _ space hint) `(MAlloc ,space ,hint)]
-      
-      [(Map-lookup _ mvar k default? d)
-       `(Map-lookup ,mvar ,(recur k) . ,(if d
-                                                         (list (recur d))
-                                                         '()))]
-      [(Map-extend _ mvar k v strong?)
-       `(Map-extend ,mvar ,(recur k) ,(recur v) ,strong?)]
-      [(Map-remove _ mvar k)
-       `(Map-remove ,mvar ,(recur k))]
-      [(Empty-map _ container)
-       (if (procedure? container)
-           `(Empty-map ,container)
-           `(Empty-map ,(recur container)))]
-      [(In-Dom? _ mvar k)
-       `(In-Dom? ,mvar ,(recur k))]
-      [(Map-empty? _ mvar)
-       `(Map-empty? ,mvar)]
-
-      [(Empty-set _ container)
-       (if (procedure? container)
-           `(Empty-set ,container)
-           `(Empty-set ,(recur container)))]
-      [(Set-empty? _ e)
-       `(Set-empty? _ ,(recur e))]
-      [(In-Set? _ s v)
-       `(In-Set? ,(recur s) ,(recur v))]
-      [(or (Set-Union _ s ss)
-            (Set-Add* _ s ss)
-            (Set-Remove* _ s ss)
-            (Set-Intersect _ s ss)
-            (Set-Subtract _ s ss))
-       `(,(object-name e) ,(recur s) . ,(map recur ss))]
-      [(??? _ label)
-       `(??? ,label)]))
-  (recur e))
+(define-syntax (reify-metafunctions-of stx)
+  (syntax-parse stx
+    [(_ L:Lang)
+     (define rev-vks
+       (for/fold ([acc '()])
+           ([(name mf) (in-dict (free-id-table-ref language-meta-functions #'L.id))])
+         (list* (with-orig-stx-core mf) #`'#,name acc)))
+     #`(hash #,@(reverse rev-vks))]))

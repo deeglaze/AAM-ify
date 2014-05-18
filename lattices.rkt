@@ -1,21 +1,21 @@
 #lang racket/base
 
 (require (for-syntax syntax/for-body racket/base)
-         racket/match racket/set "spaces.rkt" "shared.rkt")
+         racket/match racket/set
+         "spaces.rkt"
+         "shared.rkt")
 (provide ;; Abstract counting algebra
-         μ+ μmax μ⊔ c+ cmax c⊑ ∣γ∣>1
+         μ+ μmax μ⊔ c+ cmax c⊑ ∣γ∣>1 μ⊔/Δ
+         ;; Precision classifier algebra
+         pc⊔ for/pc⊔ for*/pc⊔
          ;; Ternary logic algebra
-         b∨ b∧ b¬ b⊔ ⦃b⦄ q∧
+         b∨ b∧ b¬ b⊔ ⦃b⦄ q∧ absb.⊤
          for/b⊔ for*/b⊔
          for/b∧ for*/b∧
          for/b∨ for*/b∨
          ;; Ternary wrappers
          (struct-out May)
-         (struct-out Must)
-         ;; answers
-         to-data in-data
-         answer⊥ answer-⊔ answer-⊔1 result-⊔
-)
+         (struct-out Must))
 
 ;; The abstract counting algebra is ≤, + and max in ℕ compactified to {0,1,ω}
 
@@ -39,6 +39,16 @@
 (define (μmax μ a c) (hash-set μ a (cmax c (hash-ref μ a 0))))
 (define (μ⊔ μ₀ μ₁) (for/fold ([μ μ₀]) ([(a c) (in-hash μ₁)]) (μmax μ a c)))
 
+(define (μmax/Δ μ a c)
+  (define old (hash-ref μ a 0))
+  (define c* (cmax c old))
+  (values (hash-set μ a c*) (not (eq? c* old))))
+(define (μ⊔/Δ μ₀ μ₁)
+  (for/fold ([μ μ₀] [Δ? #f])
+      ([(a c) (in-hash μ₁)])
+    (define-values (μ* Δ?*) (μmax/Δ μ a c))
+    (values μ* (or Δ? Δ?*))))
+
 ;; general cardinality analysis based on abstract counting info
 (define (∣γ∣>1 v μ)
   (let aliased? ([v v])
@@ -46,25 +56,44 @@
       [(variant var data)
        (for/or ([d (in-vector data)]) (aliased? d))]
       ;; INVARIANT/ASSUMPTION: abstract-ffuns do not have distinct keys that are a/equal?=#t
-      [(or (abstract-ffun map) (discrete-ffun map))
-       (for/or ([(k v) (in-hash map)])
-         (or (aliased? k) (aliased? v)))]
-      ;; keys trusted
-      [(? hash? map) (for/or ([v (in-hash-values map)]) (aliased? v))]
-      ;; FIXME?: Is it right to not dereference Address-Structural? It's of course safe.
-      [(or (Address-Structural _ a) (Address-Egal _ a))
+      [(ffun (Map _ _ kcomp _) map)
+       (case (Component-pc kcomp)
+         [(abstract discrete)
+          (for/or ([(k v) (in-hash map)])
+            (or (aliased? k) (aliased? v)))]
+         [(concrete)
+          (for/or ([v (in-hash-values map)]) (aliased? v))])]
+      ;; FIXME?: Is it right to not dereference Address 'Deref? It's of course safe.
+      [(Address _ a _ _)
        (eq? (hash-ref μ a 0) 'ω)]
-      [(? set? vs) #f] ;; trusted concrete
-      [(or (abstract-set S) (discrete-set S))
-       (for/or ([v (in-set S)]) (aliased? v))]
-      [(external (External-Space _ card _ _) ev)
+      [(fset scomp vs)
+       (case (Component-pc scomp)
+         [(concrete) #f]
+         [(abstract discrete)
+          (for/or ([v (in-set vs)]) (aliased? v))])]
+      [(Abs-Data Eh S)
+       (or (for/or ([v (in-hash-values Eh)]) (aliased? v))
+           (if (user-set? S)
+               (for/or ([v (in-set S)]) (aliased? v))
+               (aliased? S)))]
+      [(external (? External-Space? E) ev)
+       (define card (External-Space-cardinality E))
+       (unless card
+         (error '∣γ∣>1 "Partially specified spaces requires a cardinality analysis ~a" E))
        (eq? (card ev μ) 'ω)]
       [atom #f])))
 
+(define/match (pc⊔ pc₀ pc₁)
+  [(_ 'abstract) 'abstract]
+  [('abstract _) 'abstract]
+  [('discrete _) 'discrete]
+  [(_ 'discrete) 'discrete]
+  [('concrete 'concrete) 'concrete])
+
 ;; Ternary logic in the Kleene sense.
-(define ⦃t⦄ (set #t))
-(define ⦃f⦄ (set #f))
-(define ⦃b.⊤⦄ (set #t #f))
+(define ⦃t⦄ (mk-user-set #t))
+(define ⦃f⦄ (mk-user-set #f))
+(define ⦃b.⊤⦄ (mk-user-set #t #f))
 (define/match (⦃b⦄ b)
   [(#t) ⦃t⦄]
   [(#f) ⦃f⦄]
@@ -91,6 +120,7 @@
 (define (q∧ q b)
   (and (boolean? b) q))
 
+(define absb.⊤ (Abs-Data ρ₀ (⦃b⦄ 'b.⊤)))
 (define (b¬ b) (if (eq? b 'b.⊤) 'b.⊤ (not b)))
 
 ;; 'b.⊤ if different, except if b₀ is -unmapped, in which case we get b₁
@@ -128,56 +158,6 @@
 ;; short-circuit on #t
 (define-for/b-op for/b∨ for/fold #f b∨ bval (eq? bval #t))
 (define-for/b-op for*/b∨ for*/fold #f b∨ bval (eq? bval #t))
-
-;;; Abstract results
-(define (term-⊔ v₀ v₁)
-  (match* (v₀ v₁)
-    [(v v) v]
-    [((Abs-Data payload₀) (Abs-Data payload₁))
-     (Abs-Data (set-union payload₀ payload₁))]
-    [((Abs-Data payload) v)
-     (Abs-Data (set-add payload v))]
-    [(v (Abs-Data payload))
-     (Abs-Data (set-add payload v))]))
-
-(define (in-data v)
-  (match v
-    [(Abs-Data S) (in-set S)]
-    [singleton (in-value singleton)]))
-
-(define absb.⊤ (Abs-Data (⦃b⦄ 'b.⊤)))
-(define (to-data v)
-  (if (eq? v 'b.⊤)
-      absb.⊤
-      v))
-
-;; An answer is a map from a list of choices to a Abs-Result/effect.
-(define answer⊥ #hash())
-(define (answer-⊔ ans₀ ans₁)
-  (if (eq? ans₀ ans₁)
-      ans₀
-      (for/fold ([ans ans₀]) ([(choice res) (in-hash ans₁)])
-        (match (hash-ref ans₀ choice -unmapped)
-          [(== -unmapped eq?)
-           (hash-set ans choice res)]
-          [res* (hash-set ans choice (result-⊔ res res*))]))))
-
-(define (answer-⊔1 ans choice res)
-  (match (hash-ref ans choice -unmapped)
-    [(== -unmapped eq?) (hash-set ans choice res)]
-    [res* (hash-set ans choice (result-⊔ res* res))]))
-
-
-
-(define/match (result-⊔ res₀ res₁)
-  [((Abs-Result/effect certain?₀ v₀ σ₀ μ₀)
-    (Abs-Result/effect certain?₁ v₁ σ₁ μ₁))
-   (Abs-Result/effect (and certain?₀ certain?₁) (term-⊔ v₀ v₁)
-                      (store-space-⊔ σ₀ σ₁) (μ⊔ μ₀ μ₁))])
-
-;; TODO?: Plug in custom ⊔ here.
-(define (store-space-⊔ σ₀ σ₁)
-  (if (eq? σ₀ σ₁)
-      σ₀
-      (for/fold ([σ σ₀]) ([(space store) (in-hash σ₁)])
-        (hash-set σ space (hash-join store (hash-ref σ₀ space #hash()))))))
+;; short-circuit on 'abstract
+(define-for/b-op for/pc⊔ for/fold 'concrete pc⊔ bval (eq? bval 'abstract))
+(define-for/b-op for*/pc⊔ for*/fold 'concrete pc⊔ bval (eq? bval 'abstract))

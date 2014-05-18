@@ -15,7 +15,7 @@
 (define (alloc-skeleton abs-rules abs-Ξ)
   (values (λ (ς ρ [hint #f]) hint)
           #`(λ (ς ρ hint)
-               (match-define (Abs-State term σ μ) ς)
+               (match-define (Abs-State term σ μ τ̂) ς)
                (match hint
                  #,@(alloc-hints abs-rules)
                  #,@(for*/list ([mf (in-dict-values abs-Ξ)]
@@ -24,63 +24,89 @@
                       hint)))))
 
 ;; Create all the clauses for a user to fill in with better hints than the hint themselves.
-(define (alloc-hints rules)
-  (for/list ([hint (in-list (rules-hints rules))])
-    ;; quoted hint is the local variable introduced by alloc-skeleton.
-    #`[(quasiquote #,(addr->syntax hint)) hint]))
+(define (alloc-hints RR)
+  (match RR
+    [(or (Reduction-Relation rules _) (? list? rules))
+     (for/list ([hint (in-list (rules-hints rules))])
+       ;; quoted hint is the local variable introduced by alloc-skeleton.
+       #`[#,(addr->syntax hint) hint])]
+    [_ (error 'alloc-hints "Bad reduction relation ~a" RR)]))
 
-(define (addr->syntax lst)
-  (match lst
-    ['() '()]
-    [(cons (or (? symbol? s) (? pair? s)) lst)
-     (cons s (addr->syntax lst))]
-    [(cons (Variant-field name idx) lst)
-     (cons #`(unquote (Variant-field (quote #,name) #,idx)) (addr->syntax lst))]))
+(define (addr->syntax addr)
+  (define (recur addr under-quote? unquoted-since-qq?)
+   (match addr
+     ['() (if under-quote?
+              (values '() unquoted-since-qq?)
+              (values #''() #f))]
+     [(or (? symbol?) (? number?) (? char?) (? string?))
+      (if under-quote?
+          (values addr unquoted-since-qq?)
+          (values #`(quote #,addr) #f))]
+     [(Variant-field name idx)
+      (define pat #`(Variant-field '#,name '#,idx))
+      (if under-quote?
+          (values #`(#,#'unquote #,pat) #t)
+          (values pat #f))]
+     [(cons addr lst)
+      (cond
+       [under-quote?
+        (define-values (addr-stx unq?) (recur addr #t unquoted-since-qq?))
+        (define-values (lst-stx unq?*) (recur lst #t unq?))
+        (values (cons addr-stx lst-stx) unq?*)]
+       [else
+        (define-values (addr-stx unq?) (recur addr #t #f))
+        (define-values (lst-stx unq?*) (recur lst #t unq?))
+        (if unq?*
+            (values #`(quasiquote #,(cons addr-stx lst-stx)) #f)
+            (values #`(quote #,(cons addr-stx lst-stx)) #f))])]
+     [_ (error 'addr->syntax "Bad address ~a" addr)]))
+  (define-values (stx dummy) (recur addr #f #f))
+  stx)
 
 (define (rules-hints rules [rtail '()])
   (hint-map (λ (rule tail)
-               (match-define (Rule name lhs rhs (BSCS si bscs)) rule)
+               (match-define (Rule name lhs rhs (BSCS si bscs) _ _) rule)
                (bscs-hints bscs tail))
             rules rtail))
 
 (define (hint-map f lst tail)
   (match lst
     ['() tail]
-    [(cons a lst) (f a (hint-map f lst tail))]))
+    [(cons a lst) (f a (hint-map f lst tail))]
+    [_ (error 'hint-map "Bad list ~a" lst)]))
 
 (define (bscs-hints bscs tail) (hint-map bsc-hints bscs tail))
 
 (define (bsc-hints bsc tail)
   (match bsc
     [(or (Binding _ expr) (When expr)) (expression-hints expr tail)]
-    [(Store-extend kexpr vexpr _) (expression-hints kexpr (expression-hints vexpr tail))]))
+    [(Store-extend kexpr vexpr _) (expression-hints kexpr (expression-hints vexpr tail))]
+    [_ (error 'bsc-hints "Bad BSC ~a" bsc)]))
 
 (define (expression-hints expr tail)
   (match expr
-    [(or (Choose _ _ expr)
-         (Store-lookup _ expr)
-         (In-Dom? _ _ expr)
-         (Set-empty? _ expr))
+    [(or (Choose _ _ _ expr)
+         (Store-lookup _ _ expr)
+         (In-Dom? _ _ _ expr)
+         (Set-empty? _ _ expr))
      (expression-hints expr tail)]
-    [(or (? SAlloc?) (? MAlloc?))
-     (error 'expression-hints "Unqualified allocation ~a" expr)]
-    [(or (QSAlloc _ _ hint) (QMAlloc _ _ hint)) (cons hint tail)]
-    [(or (Equal _ expr0 expr1)
-         (Map-lookup _ _ expr0 _ expr1)
-         (Map-extend _ _ expr0 expr1 _)
-         (In-Set? _ expr0 expr1))
+    [(Alloc _ _ _ _ _ hint) (cons hint tail)]
+    [(or (Equal _ _ expr0 expr1)
+         (Map-lookup _ _ _ expr0 _ expr1)
+         (Map-extend _ _ _ expr0 expr1 _)
+         (In-Set? _ _ expr0 expr1))
      (expression-hints expr0 (if expr1 (expression-hints expr1 tail) tail))]
-    [(If _ g t e)
+    [(If _ _ g t e)
      (expression-hints g (expression-hints t (expression-hints e tail)))]
-    [(Let _ (BSCS _ bscs) bexpr)
+    [(Let _ _ (BSCS _ bscs) bexpr)
      (bscs-hints bscs (expression-hints bexpr tail))]
-    [(Match _ expr rules)
+    [(Match _ _ expr rules)
      (expression-hints expr (rules-hints rules tail))]
-    [(or (Set-Union _ expr exprs)
-         (Set-Add* _ expr exprs)
-         (Set-Remove* _ expr exprs)
-         (Set-Subtract _ expr exprs)
-         (Set-Intersect _ expr exprs))
+    [(or (Set-Union _ _ expr exprs)
+         (Set-Add* _ _ expr exprs)
+         (Set-Remove* _ _ expr exprs)
+         (Set-Subtract _ _ expr exprs)
+         (Set-Intersect _ _ expr exprs))
      (expression-hints expr (hint-map expression-hints exprs tail))]
     [(or (? Term?) (? Empty-set?) (? Meta-function-call?) (? ????)) tail]
     [_ (error 'expression-hints "Unhandled expression ~a" expr)]))
